@@ -22,8 +22,24 @@ imap:
   user: ""
   password: ""
   folder: "INBOX"
+  processedFolder: "Processed"
   useSSL: true
   pollIntervalSeconds: 300
+
+# DB backend: "sqlite" o "postgres"
+db:
+  backend: "sqlite"
+  # SQLite — usato solo se backend=sqlite
+  sqlite:
+    path: "/data/dmarc.db"
+  # PostgreSQL — usato solo se backend=postgres
+  postgres:
+    host: ""
+    port: 5432
+    database: "dmarc"
+    user: "dmarc"
+    password: ""
+    sslmode: "prefer"
 
 persistence:
   enabled: true

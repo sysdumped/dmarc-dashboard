@@ -21,8 +21,7 @@ spec:
           ports:
             - containerPort: 8000
           env:
-            - name: DB_PATH
-              value: /data/dmarc.db
+            # ── IMAP ──────────────────────────────────────────────────────
             - name: IMAP_HOST
               value: {{ .Values.imap.host | quote }}
             - name: IMAP_PORT
@@ -36,10 +35,40 @@ spec:
                   key: password
             - name: IMAP_FOLDER
               value: {{ .Values.imap.folder | quote }}
+            - name: IMAP_PROCESSED_FOLDER
+              value: {{ .Values.imap.processedFolder | quote }}
             - name: IMAP_USE_SSL
               value: {{ .Values.imap.useSSL | quote }}
             - name: POLL_INTERVAL_SECONDS
               value: {{ .Values.imap.pollIntervalSeconds | quote }}
+
+            # ── Database ──────────────────────────────────────────────────
+            - name: DB_BACKEND
+              value: {{ .Values.db.backend | quote }}
+
+            {{- if eq .Values.db.backend "sqlite" }}
+            - name: DB_PATH
+              value: {{ .Values.db.sqlite.path | quote }}
+            {{- end }}
+
+            {{- if eq .Values.db.backend "postgres" }}
+            - name: PG_HOST
+              value: {{ .Values.db.postgres.host | quote }}
+            - name: PG_PORT
+              value: {{ .Values.db.postgres.port | quote }}
+            - name: PG_DB
+              value: {{ .Values.db.postgres.database | quote }}
+            - name: PG_USER
+              value: {{ .Values.db.postgres.user | quote }}
+            - name: PG_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dmarc-dashboard.fullname" . }}-pg
+                  key: password
+            - name: PG_SSLMODE
+              value: {{ .Values.db.postgres.sslmode | quote }}
+            {{- end }}
+
           volumeMounts:
             - name: data
               mountPath: /data

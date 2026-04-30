@@ -1,6 +1,7 @@
 categories:
   - name: Immagine
   - name: Connessione IMAP
+  - name: Database
   - name: Ingress
   - name: Storage
   - name: Risorse
@@ -75,6 +76,14 @@ questions:
     required: true
     group: "Connessione IMAP"
 
+  - variable: imap.processedFolder
+    label: "Cartella messaggi processati"
+    description: "Cartella root (non sotto INBOX) dove spostare le email dopo l'importazione. Verrà creata automaticamente se non esiste."
+    type: string
+    default: "Processed"
+    required: true
+    group: "Connessione IMAP"
+
   - variable: imap.pollIntervalSeconds
     label: "Intervallo polling (secondi)"
     description: "Frequenza con cui l'applicazione controlla nuove email"
@@ -83,6 +92,79 @@ questions:
     min: 60
     max: 3600
     group: "Connessione IMAP"
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  - variable: db.backend
+    label: "Backend database"
+    description: "SQLite è zero-config e sufficiente per la maggior parte dei casi. PostgreSQL consigliato per volumi elevati o ambienti multi-istanza."
+    type: enum
+    options:
+      - "sqlite"
+      - "postgres"
+    default: "sqlite"
+    required: true
+    group: "Database"
+    show_subquestion_if: "postgres"
+    subquestions:
+      - variable: db.postgres.host
+        label: "Host PostgreSQL"
+        description: "Hostname o IP del server PostgreSQL"
+        type: string
+        required: true
+
+      - variable: db.postgres.port
+        label: "Porta PostgreSQL"
+        type: int
+        default: 5432
+
+      - variable: db.postgres.database
+        label: "Nome database"
+        type: string
+        default: "dmarc"
+        required: true
+
+      - variable: db.postgres.user
+        label: "Utente PostgreSQL"
+        type: string
+        default: "dmarc"
+        required: true
+
+      - variable: db.postgres.password
+        label: "Password PostgreSQL"
+        description: "Verrà salvata in un Secret Kubernetes. Evita caratteri speciali shell come $ e !"
+        type: password
+        required: true
+
+      - variable: db.postgres.sslmode
+        label: "SSL mode"
+        type: enum
+        options:
+          - "disable"
+          - "allow"
+          - "prefer"
+          - "require"
+          - "verify-ca"
+          - "verify-full"
+        default: "prefer"
+
+  # ── Storage (PVC per SQLite) ───────────────────────────────────────────────
+  - variable: persistence.enabled
+    label: "Abilita persistenza dati"
+    description: "Necessario se usi SQLite. Con PostgreSQL puoi disabilitarla."
+    type: boolean
+    default: true
+    group: "Storage"
+    show_subquestion_if: true
+    subquestions:
+      - variable: persistence.storageClass
+        label: "Storage class"
+        type: storageclass
+        default: "longhorn"
+
+      - variable: persistence.size
+        label: "Dimensione volume"
+        type: string
+        default: "2Gi"
 
   # ── Ingress ───────────────────────────────────────────────────────────────
   - variable: ingress.enabled
@@ -113,25 +195,6 @@ questions:
         description: "Nome del Secret con il certificato (cert-manager lo crea automaticamente)"
         type: string
         default: "dmarc-dashboard-tls"
-
-  # ── Storage ───────────────────────────────────────────────────────────────
-  - variable: persistence.enabled
-    label: "Abilita persistenza dati"
-    description: "Raccomandato: senza persistenza i report importati vengono persi al riavvio"
-    type: boolean
-    default: true
-    group: "Storage"
-    show_subquestion_if: true
-    subquestions:
-      - variable: persistence.storageClass
-        label: "Storage class"
-        type: storageclass
-        default: "longhorn"
-
-      - variable: persistence.size
-        label: "Dimensione volume"
-        type: string
-        default: "2Gi"
 
   # ── Risorse ───────────────────────────────────────────────────────────────
   - variable: resources.requests.cpu
