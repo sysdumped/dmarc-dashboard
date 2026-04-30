@@ -9,7 +9,8 @@
     "recharts": "^2.12.7",
     "leaflet": "^1.9.4",
     "react-leaflet": "^4.2.1",
-    "date-fns": "^3.6.0"
+    "date-fns": "^3.6.0",
+    "eslint-plugin-react-hooks": "^4.6.2"
   },
   "scripts": {
     "start": "react-scripts start",

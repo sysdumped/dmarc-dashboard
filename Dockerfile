@@ -1,9 +1,10 @@
 # ── Stage 1: build React frontend ──────────────────────────────────────────
-FROM node:20-alpine AS frontend-build
+FROM node:18-alpine AS frontend-build
 
 WORKDIR /build/frontend
 COPY frontend/package.json ./
-RUN npm install --legacy-peer-deps
+RUN npm install --legacy-peer-deps && \
+    npm install --legacy-peer-deps ajv@^8.11.0 ajv-keywords@^5.1.0
 
 COPY frontend/ ./
 RUN npm run build

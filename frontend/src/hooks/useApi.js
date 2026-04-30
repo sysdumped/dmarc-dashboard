@@ -24,8 +24,7 @@ export function useApi(path, deps = [], refreshInterval = 0) {
     } finally {
       setLoading(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, ...deps]);
+  }, [path]); // eslint-disable-line
 
   useEffect(() => {
     load();
