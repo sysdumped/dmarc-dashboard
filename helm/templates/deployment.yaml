@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dmarc-dashboard.fullname" . }}
+  labels:
+    app: {{ include "dmarc-dashboard.fullname" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "dmarc-dashboard.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "dmarc-dashboard.fullname" . }}
+    spec:
+      containers:
+        - name: dmarc-dashboard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_PATH
+              value: /data/dmarc.db
+            - name: IMAP_HOST
+              value: {{ .Values.imap.host | quote }}
+            - name: IMAP_PORT
+              value: {{ .Values.imap.port | quote }}
+            - name: IMAP_USER
+              value: {{ .Values.imap.user | quote }}
+            - name: IMAP_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.imap.passwordSecretName }}
+                  key: {{ .Values.imap.passwordSecretKey }}
+            - name: IMAP_FOLDER
+              value: {{ .Values.imap.folder | quote }}
+            - name: IMAP_USE_SSL
+              value: {{ .Values.imap.useSSL | quote }}
+            - name: POLL_INTERVAL_SECONDS
+              value: {{ .Values.imap.pollIntervalSeconds | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /api/fetch_log
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/fetch_log
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "dmarc-dashboard.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

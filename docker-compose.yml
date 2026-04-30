@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  dmarc-dashboard:
+    build: .
+    image: dmarc-dashboard:latest
+    container_name: dmarc-dashboard
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - dmarc-data:/data
+    environment:
+      IMAP_HOST: "${IMAP_HOST}"
+      IMAP_PORT: "${IMAP_PORT:-993}"
+      IMAP_USER: "${IMAP_USER}"
+      IMAP_PASS: "${IMAP_PASS}"
+      IMAP_FOLDER: "${IMAP_FOLDER:-INBOX}"
+      IMAP_USE_SSL: "${IMAP_USE_SSL:-true}"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
+
+volumes:
+  dmarc-data:

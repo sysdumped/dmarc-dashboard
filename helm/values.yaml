@@ -1,0 +1,42 @@
+replicaCount: 1
+
+image:
+  repository: your-registry/dmarc-dashboard   # <-- cambia con il tuo registry
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  host: dmarc.example.com                      # <-- cambia con il tuo hostname
+  tls: true
+  tlsSecret: dmarc-tls                         # cert-manager o manuale
+
+imap:
+  host: "mail.example.com"
+  port: "993"
+  user: "dmarc@example.com"
+  # La password viene da un Secret Kubernetes (vedi sotto)
+  passwordSecretName: "dmarc-imap-secret"
+  passwordSecretKey: "password"
+  folder: "INBOX"
+  useSSL: "true"
+  pollIntervalSeconds: "300"
+
+persistence:
+  enabled: true
+  storageClass: "longhorn"                     # usa longhorn come nel tuo cluster
+  size: 2Gi
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
