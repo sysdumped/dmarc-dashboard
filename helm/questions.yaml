@@ -1,0 +1,159 @@
+categories:
+  - name: Immagine
+  - name: Connessione IMAP
+  - name: Ingress
+  - name: Storage
+  - name: Risorse
+
+questions:
+
+  # ── Immagine ──────────────────────────────────────────────────────────────
+  - variable: image.repository
+    label: "Repository immagine"
+    description: "es. gitea.example.com/myorg/dmarc-dashboard"
+    type: string
+    required: true
+    group: "Immagine"
+
+  - variable: image.tag
+    label: "Tag immagine"
+    type: string
+    default: "latest"
+    required: true
+    group: "Immagine"
+
+  - variable: image.pullPolicy
+    label: "Pull policy"
+    type: enum
+    options:
+      - "IfNotPresent"
+      - "Always"
+      - "Never"
+    default: "IfNotPresent"
+    group: "Immagine"
+
+  # ── IMAP ──────────────────────────────────────────────────────────────────
+  - variable: imap.host
+    label: "Server IMAP"
+    description: "Hostname o IP del server IMAP (es. mail.example.com)"
+    type: string
+    required: true
+    group: "Connessione IMAP"
+
+  - variable: imap.port
+    label: "Porta IMAP"
+    type: int
+    default: 993
+    required: true
+    group: "Connessione IMAP"
+
+  - variable: imap.useSSL
+    label: "Usa SSL/TLS"
+    type: boolean
+    default: true
+    group: "Connessione IMAP"
+
+  - variable: imap.user
+    label: "Indirizzo email / username"
+    description: "Account che riceve i report DMARC (rua)"
+    type: string
+    required: true
+    group: "Connessione IMAP"
+
+  - variable: imap.password
+    label: "Password IMAP"
+    description: "Verrà salvata in un Secret Kubernetes. Evita caratteri speciali shell come $ e !"
+    type: password
+    required: true
+    group: "Connessione IMAP"
+
+  - variable: imap.folder
+    label: "Cartella IMAP"
+    description: "Cartella in cui arrivano i report DMARC (es. INBOX o DMARC)"
+    type: string
+    default: "INBOX"
+    required: true
+    group: "Connessione IMAP"
+
+  - variable: imap.pollIntervalSeconds
+    label: "Intervallo polling (secondi)"
+    description: "Frequenza con cui l'applicazione controlla nuove email"
+    type: int
+    default: 300
+    min: 60
+    max: 3600
+    group: "Connessione IMAP"
+
+  # ── Ingress ───────────────────────────────────────────────────────────────
+  - variable: ingress.enabled
+    label: "Abilita Ingress"
+    type: boolean
+    default: true
+    group: "Ingress"
+    show_subquestion_if: true
+    subquestions:
+      - variable: ingress.host
+        label: "Hostname"
+        description: "es. dmarc.example.com"
+        type: hostname
+        required: true
+
+      - variable: ingress.className
+        label: "Ingress class"
+        type: string
+        default: "nginx"
+
+      - variable: ingress.tls
+        label: "Abilita TLS"
+        type: boolean
+        default: true
+
+      - variable: ingress.tlsSecret
+        label: "Nome Secret TLS"
+        description: "Nome del Secret con il certificato (cert-manager lo crea automaticamente)"
+        type: string
+        default: "dmarc-dashboard-tls"
+
+  # ── Storage ───────────────────────────────────────────────────────────────
+  - variable: persistence.enabled
+    label: "Abilita persistenza dati"
+    description: "Raccomandato: senza persistenza i report importati vengono persi al riavvio"
+    type: boolean
+    default: true
+    group: "Storage"
+    show_subquestion_if: true
+    subquestions:
+      - variable: persistence.storageClass
+        label: "Storage class"
+        type: storageclass
+        default: "longhorn"
+
+      - variable: persistence.size
+        label: "Dimensione volume"
+        type: string
+        default: "2Gi"
+
+  # ── Risorse ───────────────────────────────────────────────────────────────
+  - variable: resources.requests.cpu
+    label: "CPU request"
+    type: string
+    default: "100m"
+    group: "Risorse"
+
+  - variable: resources.requests.memory
+    label: "Memory request"
+    type: string
+    default: "128Mi"
+    group: "Risorse"
+
+  - variable: resources.limits.cpu
+    label: "CPU limit"
+    type: string
+    default: "500m"
+    group: "Risorse"
+
+  - variable: resources.limits.memory
+    label: "Memory limit"
+    type: string
+    default: "512Mi"
+    group: "Risorse"

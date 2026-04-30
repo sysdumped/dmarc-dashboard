@@ -32,8 +32,8 @@ spec:
             - name: IMAP_PASS
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.imap.passwordSecretName }}
-                  key: {{ .Values.imap.passwordSecretKey }}
+                  name: {{ include "dmarc-dashboard.fullname" . }}-imap
+                  key: password
             - name: IMAP_FOLDER
               value: {{ .Values.imap.folder | quote }}
             - name: IMAP_USE_SSL
