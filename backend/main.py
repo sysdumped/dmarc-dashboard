@@ -468,43 +468,69 @@ def _q(days: int):
     """Return UNIX timestamp for 'days ago'."""
     return int((datetime.utcnow() - timedelta(days=days)).timestamp())
 
+def _domain_clause(domain: str) -> tuple[str, list]:
+    """Return an extra WHERE fragment and params for optional domain filter."""
+    if domain:
+        return f" AND p.domain = {PH} ", [domain]
+    return "", []
+
+
+@app.get("/api/stats/domains")
+def list_domains(days: int = 30):
+    """Return sorted list of distinct domains seen in the period."""
+    since = _q(days)
+    conn  = get_db()
+    cur   = conn.cursor()
+    cur.execute(f"""
+        SELECT DISTINCT domain FROM reports
+        WHERE date_begin >= {PH}
+        ORDER BY domain
+    """, (since,))
+    rows = fetchall_dict(cur)
+    cur.close(); conn.close()
+    return [r["domain"] for r in rows]
+
 
 @app.get("/api/stats/overview")
-def overview(days: int = 30):
+def overview(days: int = 30, domain: str = ""):
     since = _q(days)
+    dc, dp = _domain_clause(domain)
     conn  = get_db()
     cur   = conn.cursor()
 
     cur.execute(f"""
         SELECT COALESCE(SUM(r.count),0) FROM records r
         JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}
-    """, (since,))
+        WHERE p.date_begin >= {PH}{dc}
+    """, [since] + dp)
     total_messages = fetchone_val(cur)
 
     cur.execute(f"""
         SELECT disposition, COALESCE(SUM(count),0) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}
+        WHERE p.date_begin >= {PH}{dc}
         GROUP BY disposition
-    """, (since,))
+    """, [since] + dp)
     by_disp = fetchall_dict(cur)
 
     cur.execute(f"""
         SELECT COALESCE(SUM(count),0) FROM records r
         JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH} AND r.dkim_result='pass'
-    """, (since,))
+        WHERE p.date_begin >= {PH}{dc} AND r.dkim_result='pass'
+    """, [since] + dp)
     dkim_pass = fetchone_val(cur)
 
     cur.execute(f"""
         SELECT COALESCE(SUM(count),0) FROM records r
         JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH} AND r.spf_result='pass'
-    """, (since,))
+        WHERE p.date_begin >= {PH}{dc} AND r.spf_result='pass'
+    """, [since] + dp)
     spf_pass = fetchone_val(cur)
 
-    cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_begin >= {PH}", (since,))
+    if domain:
+        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_begin >= {PH}{dc}", [since] + dp)
+    else:
+        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_begin >= {PH}", (since,))
     report_count = fetchone_val(cur)
 
     cur.close(); conn.close()
@@ -516,12 +542,14 @@ def overview(days: int = 30):
         "dkim_pass":      dkim_pass,
         "spf_pass":       spf_pass,
         "disposition":    disp,
+        "domain_filter":  domain or None,
     }
 
 
 @app.get("/api/stats/timeline")
-def timeline(days: int = 30):
+def timeline(days: int = 30, domain: str = ""):
     since = _q(days)
+    dc, dp = _domain_clause(domain)
     conn  = get_db()
     cur   = conn.cursor()
 
@@ -530,17 +558,17 @@ def timeline(days: int = 30):
             SELECT TO_CHAR(TO_TIMESTAMP(p.date_begin),'YYYY-MM-DD') as day,
                    r.disposition, COALESCE(SUM(r.count),0) as n
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}
+            WHERE p.date_begin >= {PH}{dc}
             GROUP BY day, r.disposition ORDER BY day
-        """, (since,))
+        """, [since] + dp)
     else:
         cur.execute(f"""
             SELECT date(p.date_begin,'unixepoch') as day,
                    r.disposition, COALESCE(SUM(r.count),0) as n
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}
+            WHERE p.date_begin >= {PH}{dc}
             GROUP BY day, r.disposition ORDER BY day
-        """, (since,))
+        """, [since] + dp)
 
     rows = fetchall_dict(cur)
     cur.close(); conn.close()
@@ -555,16 +583,17 @@ def timeline(days: int = 30):
 
 
 @app.get("/api/stats/by_domain")
-def by_domain(days: int = 30):
+def by_domain(days: int = 30, domain: str = ""):
     since = _q(days)
+    dc, dp = _domain_clause(domain)
     conn  = get_db()
     cur   = conn.cursor()
     cur.execute(f"""
         SELECT p.domain, r.disposition, COALESCE(SUM(r.count),0) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}
+        WHERE p.date_begin >= {PH}{dc}
         GROUP BY p.domain, r.disposition
-    """, (since,))
+    """, [since] + dp)
     rows = fetchall_dict(cur)
     cur.close(); conn.close()
 
@@ -578,8 +607,9 @@ def by_domain(days: int = 30):
 
 
 @app.get("/api/stats/sources")
-def sources(days: int = 30, limit: int = 100):
+def sources(days: int = 30, limit: int = 100, domain: str = ""):
     since = _q(days)
+    dc, dp = _domain_clause(domain)
     conn  = get_db()
     cur   = conn.cursor()
 
@@ -590,10 +620,10 @@ def sources(days: int = 30, limit: int = 100):
                    r.geo_country, r.geo_lat, r.geo_lon,
                    STRING_AGG(DISTINCT p.domain, ',') as domains
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}
+            WHERE p.date_begin >= {PH}{dc}
             GROUP BY r.source_ip,r.dkim_result,r.spf_result,r.disposition,r.geo_country,r.geo_lat,r.geo_lon
             ORDER BY total DESC LIMIT {PH}
-        """, (since, limit))
+        """, [since] + dp + [limit])
     else:
         cur.execute(f"""
             SELECT r.source_ip, COALESCE(SUM(r.count),0) as total,
@@ -601,10 +631,10 @@ def sources(days: int = 30, limit: int = 100):
                    r.geo_country, r.geo_lat, r.geo_lon,
                    GROUP_CONCAT(DISTINCT p.domain) as domains
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}
+            WHERE p.date_begin >= {PH}{dc}
             GROUP BY r.source_ip,r.dkim_result,r.spf_result,r.disposition
             ORDER BY total DESC LIMIT {PH}
-        """, (since, limit))
+        """, [since] + dp + [limit])
 
     rows = fetchall_dict(cur)
     cur.close(); conn.close()
@@ -612,40 +642,42 @@ def sources(days: int = 30, limit: int = 100):
 
 
 @app.get("/api/stats/geo")
-def geo(days: int = 30):
+def geo(days: int = 30, domain: str = ""):
     since = _q(days)
+    dc, dp = _domain_clause(domain)
     conn  = get_db()
     cur   = conn.cursor()
     cur.execute(f"""
         SELECT r.geo_lat, r.geo_lon, r.geo_country,
                r.disposition, COALESCE(SUM(r.count),0) as total
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH} AND r.geo_lat IS NOT NULL
+        WHERE p.date_begin >= {PH}{dc} AND r.geo_lat IS NOT NULL
         GROUP BY r.geo_lat, r.geo_lon, r.geo_country, r.disposition
-    """, (since,))
+    """, [since] + dp)
     rows = fetchall_dict(cur)
     cur.close(); conn.close()
     return rows
 
 
 @app.get("/api/alerts")
-def alerts(days: int = 30):
+def alerts(days: int = 30, domain: str = ""):
     since = _q(days)
+    dc, dp = _domain_clause(domain)
     conn  = get_db()
     cur   = conn.cursor()
 
     cur.execute(f"""
         SELECT p.domain, p.policy_p, r.disposition, SUM(r.count) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH} AND r.disposition IN ('reject','quarantine')
+        WHERE p.date_begin >= {PH}{dc} AND r.disposition IN ('reject','quarantine')
         GROUP BY p.domain, p.policy_p, r.disposition ORDER BY n DESC
-    """, (since,))
+    """, [since] + dp)
     failing = fetchall_dict(cur)
 
     cur.execute(f"""
         SELECT DISTINCT domain, policy_p FROM reports
-        WHERE date_begin >= {PH} AND policy_p='none'
-    """, (since,))
+        WHERE date_begin >= {PH}{dc} AND policy_p='none'
+    """, [since] + dp)
     not_enforced = fetchall_dict(cur)
 
     cur.close(); conn.close()
