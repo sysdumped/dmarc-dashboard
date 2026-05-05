@@ -465,7 +465,14 @@ def startup():
 
 
 def _q(days: int):
-    """Return UNIX timestamp for 'days ago'."""
+    """Return UNIX timestamp for 'days ago'.
+    
+    We filter on date_end (not date_begin) so that a report covering
+    yesterday (date_begin=yesterday 00:00, date_end=yesterday 23:59)
+    is visible when the user selects '1g', even if the email arrived
+    this morning. date_begin would exclude it because it falls outside
+    the [now-1day, now] window.
+    """
     return int((datetime.utcnow() - timedelta(days=days)).timestamp())
 
 def _domain_clause(domain: str) -> tuple[str, list]:
@@ -483,7 +490,7 @@ def list_domains(days: int = 30):
     cur   = conn.cursor()
     cur.execute(f"""
         SELECT DISTINCT domain FROM reports
-        WHERE date_begin >= {PH}
+        WHERE date_end >= {PH}
         ORDER BY domain
     """, (since,))
     rows = fetchall_dict(cur)
@@ -501,14 +508,14 @@ def overview(days: int = 30, domain: str = ""):
     cur.execute(f"""
         SELECT COALESCE(SUM(r.count),0) FROM records r
         JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc}
+        WHERE p.date_end >= {PH}{dc}
     """, [since] + dp)
     total_messages = fetchone_val(cur)
 
     cur.execute(f"""
         SELECT disposition, COALESCE(SUM(count),0) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc}
+        WHERE p.date_end >= {PH}{dc}
         GROUP BY disposition
     """, [since] + dp)
     by_disp = fetchall_dict(cur)
@@ -516,21 +523,21 @@ def overview(days: int = 30, domain: str = ""):
     cur.execute(f"""
         SELECT COALESCE(SUM(count),0) FROM records r
         JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc} AND r.dkim_result='pass'
+        WHERE p.date_end >= {PH}{dc} AND r.dkim_result='pass'
     """, [since] + dp)
     dkim_pass = fetchone_val(cur)
 
     cur.execute(f"""
         SELECT COALESCE(SUM(count),0) FROM records r
         JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc} AND r.spf_result='pass'
+        WHERE p.date_end >= {PH}{dc} AND r.spf_result='pass'
     """, [since] + dp)
     spf_pass = fetchone_val(cur)
 
     if domain:
-        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_begin >= {PH}{dc}", [since] + dp)
+        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_end >= {PH}{dc}", [since] + dp)
     else:
-        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_begin >= {PH}", (since,))
+        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_end >= {PH}", (since,))
     report_count = fetchone_val(cur)
 
     cur.close(); conn.close()
@@ -558,7 +565,7 @@ def timeline(days: int = 30, domain: str = ""):
             SELECT TO_CHAR(TO_TIMESTAMP(p.date_begin),'YYYY-MM-DD') as day,
                    r.disposition, COALESCE(SUM(r.count),0) as n
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}{dc}
+            WHERE p.date_end >= {PH}{dc}
             GROUP BY day, r.disposition ORDER BY day
         """, [since] + dp)
     else:
@@ -566,7 +573,7 @@ def timeline(days: int = 30, domain: str = ""):
             SELECT date(p.date_begin,'unixepoch') as day,
                    r.disposition, COALESCE(SUM(r.count),0) as n
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}{dc}
+            WHERE p.date_end >= {PH}{dc}
             GROUP BY day, r.disposition ORDER BY day
         """, [since] + dp)
 
@@ -591,7 +598,7 @@ def by_domain(days: int = 30, domain: str = ""):
     cur.execute(f"""
         SELECT p.domain, r.disposition, COALESCE(SUM(r.count),0) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc}
+        WHERE p.date_end >= {PH}{dc}
         GROUP BY p.domain, r.disposition
     """, [since] + dp)
     rows = fetchall_dict(cur)
@@ -620,7 +627,7 @@ def sources(days: int = 30, limit: int = 100, domain: str = ""):
                    r.geo_country, r.geo_lat, r.geo_lon,
                    STRING_AGG(DISTINCT p.domain, ',') as domains
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}{dc}
+            WHERE p.date_end >= {PH}{dc}
             GROUP BY r.source_ip,r.dkim_result,r.spf_result,r.disposition,r.geo_country,r.geo_lat,r.geo_lon
             ORDER BY total DESC LIMIT {PH}
         """, [since] + dp + [limit])
@@ -631,7 +638,7 @@ def sources(days: int = 30, limit: int = 100, domain: str = ""):
                    r.geo_country, r.geo_lat, r.geo_lon,
                    GROUP_CONCAT(DISTINCT p.domain) as domains
             FROM records r JOIN reports p ON r.report_id=p.report_id
-            WHERE p.date_begin >= {PH}{dc}
+            WHERE p.date_end >= {PH}{dc}
             GROUP BY r.source_ip,r.dkim_result,r.spf_result,r.disposition
             ORDER BY total DESC LIMIT {PH}
         """, [since] + dp + [limit])
@@ -651,7 +658,7 @@ def geo(days: int = 30, domain: str = ""):
         SELECT r.geo_lat, r.geo_lon, r.geo_country,
                r.disposition, COALESCE(SUM(r.count),0) as total
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc} AND r.geo_lat IS NOT NULL
+        WHERE p.date_end >= {PH}{dc} AND r.geo_lat IS NOT NULL
         GROUP BY r.geo_lat, r.geo_lon, r.geo_country, r.disposition
     """, [since] + dp)
     rows = fetchall_dict(cur)
@@ -669,14 +676,14 @@ def alerts(days: int = 30, domain: str = ""):
     cur.execute(f"""
         SELECT p.domain, p.policy_p, r.disposition, SUM(r.count) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
-        WHERE p.date_begin >= {PH}{dc} AND r.disposition IN ('reject','quarantine')
+        WHERE p.date_end >= {PH}{dc} AND r.disposition IN ('reject','quarantine')
         GROUP BY p.domain, p.policy_p, r.disposition ORDER BY n DESC
     """, [since] + dp)
     failing = fetchall_dict(cur)
 
     cur.execute(f"""
         SELECT DISTINCT domain, policy_p FROM reports
-        WHERE date_begin >= {PH}{dc} AND policy_p='none'
+        WHERE date_end >= {PH}{dc} AND policy_p='none'
     """, [since] + dp)
     not_enforced = fetchall_dict(cur)
 
