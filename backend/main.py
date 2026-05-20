@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional
 import email
+import email.header
 import imaplib
 
 from fastapi import FastAPI, BackgroundTasks
@@ -29,37 +30,26 @@ app.add_middleware(
 # CONFIG
 # ---------------------------------------------------------------------------
 
-IMAP_HOST            = os.environ.get("IMAP_HOST", "")
-IMAP_PORT            = int(os.environ.get("IMAP_PORT", "993"))
-IMAP_USER            = os.environ.get("IMAP_USER", "")
-IMAP_PASS            = os.environ.get("IMAP_PASS", "")
-IMAP_FOLDER          = os.environ.get("IMAP_FOLDER", "INBOX")
+IMAP_HOST             = os.environ.get("IMAP_HOST", "")
+IMAP_PORT             = int(os.environ.get("IMAP_PORT", "993"))
+IMAP_USER             = os.environ.get("IMAP_USER", "")
+IMAP_PASS             = os.environ.get("IMAP_PASS", "")
+IMAP_FOLDER           = os.environ.get("IMAP_FOLDER", "INBOX")
 IMAP_PROCESSED_FOLDER = os.environ.get("IMAP_PROCESSED_FOLDER", "Processed")
-IMAP_USE_SSL         = os.environ.get("IMAP_USE_SSL", "true").lower() == "true"
-POLL_INTERVAL        = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
+IMAP_USE_SSL          = os.environ.get("IMAP_USE_SSL", "true").lower() == "true"
+POLL_INTERVAL         = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 
-# DB backend: "sqlite" (default) or "postgres"
-DB_BACKEND           = os.environ.get("DB_BACKEND", "sqlite").lower()
-
-# SQLite
-DB_PATH              = os.environ.get("DB_PATH", "/data/dmarc.db")
-
-# PostgreSQL
-PG_HOST              = os.environ.get("PG_HOST", "localhost")
-PG_PORT              = int(os.environ.get("PG_PORT", "5432"))
-PG_DB                = os.environ.get("PG_DB", "dmarc")
-PG_USER              = os.environ.get("PG_USER", "dmarc")
-PG_PASS              = os.environ.get("PG_PASS", "")
-PG_SSLMODE           = os.environ.get("PG_SSLMODE", "prefer")
+DB_BACKEND  = os.environ.get("DB_BACKEND", "sqlite").lower()
+DB_PATH     = os.environ.get("DB_PATH", "/data/dmarc.db")
+PG_HOST     = os.environ.get("PG_HOST", "localhost")
+PG_PORT     = int(os.environ.get("PG_PORT", "5432"))
+PG_DB       = os.environ.get("PG_DB", "dmarc")
+PG_USER     = os.environ.get("PG_USER", "dmarc")
+PG_PASS     = os.environ.get("PG_PASS", "")
+PG_SSLMODE  = os.environ.get("PG_SSLMODE", "prefer")
 
 # ---------------------------------------------------------------------------
 # DATABASE ABSTRACTION
-# ---------------------------------------------------------------------------
-# Both backends expose the same interface:
-#   get_db()  -> connection (context-manager safe)
-#   ph(n)     -> placeholder string for n positional params ("?,?,?" / "%s,%s,%s")
-#   lastrowid(cursor) -> last inserted id
-#   executescript(conn, sql) -> run DDL (SQLite) or split+execute (PG)
 # ---------------------------------------------------------------------------
 
 if DB_BACKEND == "postgres":
@@ -74,13 +64,6 @@ if DB_BACKEND == "postgres":
         conn.autocommit = False
         return conn
 
-    def ph(n: int = 1) -> str:
-        return ",".join(["%s"] * n)
-
-    def row_factory(cursor, row):
-        cols = [desc[0] for desc in cursor.description]
-        return dict(zip(cols, row))
-
     def fetchall_dict(cursor):
         cols = [desc[0] for desc in cursor.description]
         return [dict(zip(cols, row)) for row in cursor.fetchall()]
@@ -91,7 +74,7 @@ if DB_BACKEND == "postgres":
 
     def init_db():
         conn = get_db()
-        cur = conn.cursor()
+        cur  = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 id          SERIAL PRIMARY KEY,
@@ -104,7 +87,10 @@ if DB_BACKEND == "postgres":
                 policy_p    TEXT,
                 policy_sp   TEXT,
                 policy_pct  INTEGER,
-                fetched_at  TEXT
+                fetched_at  TEXT,
+                imap_from   TEXT,
+                imap_to     TEXT,
+                imap_subject TEXT
             )
         """)
         cur.execute("""
@@ -131,6 +117,16 @@ if DB_BACKEND == "postgres":
                 errors      TEXT
             )
         """)
+        # Add columns if upgrading from an older schema
+        for col, typedef in [
+            ("imap_from", "TEXT"),
+            ("imap_to", "TEXT"),
+            ("imap_subject", "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE reports ADD COLUMN IF NOT EXISTS {col} {typedef}")
+            except Exception:
+                pass
         conn.commit()
         cur.close()
         conn.close()
@@ -157,17 +153,20 @@ else:
         conn = get_db()
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS reports (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_id   TEXT UNIQUE,
-                org_name    TEXT,
-                email       TEXT,
-                domain      TEXT,
-                date_begin  INTEGER,
-                date_end    INTEGER,
-                policy_p    TEXT,
-                policy_sp   TEXT,
-                policy_pct  INTEGER,
-                fetched_at  TEXT
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id    TEXT UNIQUE,
+                org_name     TEXT,
+                email        TEXT,
+                domain       TEXT,
+                date_begin   INTEGER,
+                date_end     INTEGER,
+                policy_p     TEXT,
+                policy_sp    TEXT,
+                policy_pct   INTEGER,
+                fetched_at   TEXT,
+                imap_from    TEXT,
+                imap_to      TEXT,
+                imap_subject TEXT
             );
             CREATE TABLE IF NOT EXISTS records (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -190,13 +189,19 @@ else:
                 errors      TEXT
             );
         """)
-        conn.commit()
+        # Add columns if upgrading from older schema (SQLite ALTER TABLE)
+        for col in ["imap_from", "imap_to", "imap_subject"]:
+            try:
+                conn.execute(f"ALTER TABLE reports ADD COLUMN {col} TEXT")
+                conn.commit()
+            except Exception:
+                pass
         conn.close()
 
     PH = "?"
 
+
 def _ph(*args):
-    """Return a comma-separated placeholder string for len(args) values."""
     return ", ".join([PH] * len(args))
 
 # ---------------------------------------------------------------------------
@@ -215,11 +220,7 @@ def geo_lookup(ip: str) -> dict:
         )
         if r.status_code == 200:
             data = r.json()
-            result = {
-                "country": data.get("country", ""),
-                "lat": data.get("lat"),
-                "lon": data.get("lon"),
-            }
+            result = {"country": data.get("country", ""), "lat": data.get("lat"), "lon": data.get("lon")}
             _geo_cache[ip] = result
             return result
     except Exception:
@@ -227,8 +228,25 @@ def geo_lookup(ip: str) -> dict:
     return {"country": "", "lat": None, "lon": None}
 
 # ---------------------------------------------------------------------------
-# DMARC XML PARSER
+# HELPERS
 # ---------------------------------------------------------------------------
+
+def _decode_header(value: str) -> str:
+    """Decode RFC2047-encoded email header to plain string."""
+    if not value:
+        return ""
+    try:
+        parts = email.header.decode_header(value)
+        decoded = []
+        for part, charset in parts:
+            if isinstance(part, bytes):
+                decoded.append(part.decode(charset or "utf-8", errors="replace"))
+            else:
+                decoded.append(part)
+        return " ".join(decoded).strip()
+    except Exception:
+        return value.strip()
+
 
 def parse_dmarc_xml(xml_bytes: bytes) -> Optional[dict]:
     try:
@@ -304,12 +322,10 @@ def extract_xml_from_attachment(payload: bytes, filename: str) -> Optional[bytes
 # ---------------------------------------------------------------------------
 
 def _imap_ensure_folder(mail, folder: str) -> bool:
-    """Create folder if it does not exist. Returns True on success."""
     typ, _ = mail.select(folder)
     if typ == "OK":
         return True
-    # Folder missing — create it at root level (not under INBOX)
-    typ, data = mail.create(folder)
+    typ, _ = mail.create(folder)
     if typ != "OK":
         return False
     mail.subscribe(folder)
@@ -327,15 +343,12 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
         mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) if IMAP_USE_SSL else imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
         mail.login(IMAP_USER, IMAP_PASS)
 
-        # Ensure the Processed folder exists at root level before starting
         if not _imap_ensure_folder(mail, IMAP_PROCESSED_FOLDER):
             errors.append(f"Cannot create/access folder: {IMAP_PROCESSED_FOLDER}")
             mail.logout()
             return 0, errors
 
-        # Re-select the source folder after the ensure_folder call
         mail.select(IMAP_FOLDER)
-
         _, data = mail.search(None, "ALL")
         ids = data[0].split()
 
@@ -348,6 +361,11 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
                 _, msg_data = mail.fetch(msg_id, "(RFC822)")
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
+
+                # Extract IMAP envelope fields from the carrier email
+                imap_from    = _decode_header(msg.get("From", ""))
+                imap_to      = _decode_header(msg.get("To", ""))
+                imap_subject = _decode_header(msg.get("Subject", ""))
 
                 for part in msg.walk():
                     ct      = part.get_content_type()
@@ -371,29 +389,29 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
                     # dedup
                     cur.execute(f"SELECT id FROM reports WHERE report_id={PH}", (report["report_id"],))
                     if cur.fetchone():
-                        # Already imported — still move to Processed to keep inbox clean
                         imported = True
                         continue
 
                     fetched_at = datetime.utcnow().isoformat()
                     cur.execute(f"""
                         INSERT INTO reports
-                          (report_id,org_name,email,domain,date_begin,date_end,
-                           policy_p,policy_sp,policy_pct,fetched_at)
-                        VALUES ({_ph(*[0]*10)})
+                          (report_id, org_name, email, domain, date_begin, date_end,
+                           policy_p, policy_sp, policy_pct, fetched_at,
+                           imap_from, imap_to, imap_subject)
+                        VALUES ({_ph(*[0]*13)})
                     """, (
                         report["report_id"], report["org_name"], report["email"],
                         report["domain"], report["date_begin"], report["date_end"],
                         report["policy_p"], report["policy_sp"], report["policy_pct"],
-                        fetched_at,
+                        fetched_at, imap_from, imap_to, imap_subject,
                     ))
 
                     for rec in report["records"]:
                         geo = geo_lookup(rec["source_ip"])
                         cur.execute(f"""
                             INSERT INTO records
-                              (report_id,source_ip,count,disposition,dkim_result,spf_result,
-                               header_from,envelope_from,geo_country,geo_lat,geo_lon)
+                              (report_id, source_ip, count, disposition, dkim_result, spf_result,
+                               header_from, envelope_from, geo_country, geo_lat, geo_lon)
                             VALUES ({_ph(*[0]*11)})
                         """, (
                             report["report_id"], rec["source_ip"], rec["count"],
@@ -410,24 +428,20 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
                 errors.append(str(e))
                 continue
 
-            # Move message to Processed folder if it contained a DMARC report
-            # (imported = True covers both new inserts and already-known duplicates)
             if imported:
                 try:
-                    # IMAP COPY + mark original as \Deleted + EXPUNGE
                     result = mail.copy(msg_id, IMAP_PROCESSED_FOLDER)
                     if result[0] == "OK":
-                        mail.store(msg_id, "+FLAGS", "\\Deleted")
+                        mail.store(msg_id, "+FLAGS", "\\\\Deleted")
                     else:
                         errors.append(f"COPY to {IMAP_PROCESSED_FOLDER} failed for msg {msg_id}: {result}")
                 except Exception as e:
                     errors.append(f"Move failed for msg {msg_id}: {e}")
 
-        # Expunge deleted messages from source folder in one shot
         mail.expunge()
 
         cur.execute(
-            f"INSERT INTO fetch_log (fetched_at,new_reports,errors) VALUES ({_ph(*[0]*3)})",
+            f"INSERT INTO fetch_log (fetched_at, new_reports, errors) VALUES ({_ph(*[0]*3)})",
             (datetime.utcnow().isoformat(), new_count, "; ".join(errors[:5])),
         )
         conn.commit()
@@ -439,7 +453,6 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
         errors.append(f"IMAP connection error: {e}")
 
     return new_count, errors
-
 
 # ---------------------------------------------------------------------------
 # BACKGROUND POLLER
@@ -466,17 +479,13 @@ def startup():
 
 def _q(days: int):
     """Return UNIX timestamp for 'days ago'.
-    
-    We filter on date_end (not date_begin) so that a report covering
-    yesterday (date_begin=yesterday 00:00, date_end=yesterday 23:59)
-    is visible when the user selects '1g', even if the email arrived
-    this morning. date_begin would exclude it because it falls outside
-    the [now-1day, now] window.
+    Filter on date_end so that a report covering yesterday is visible
+    under the '1g' filter even if the email arrived this morning.
     """
     return int((datetime.utcnow() - timedelta(days=days)).timestamp())
 
+
 def _domain_clause(domain: str) -> tuple[str, list]:
-    """Return an extra WHERE fragment and params for optional domain filter."""
     if domain:
         return f" AND p.domain = {PH} ", [domain]
     return "", []
@@ -484,15 +493,10 @@ def _domain_clause(domain: str) -> tuple[str, list]:
 
 @app.get("/api/stats/domains")
 def list_domains(days: int = 30):
-    """Return sorted list of distinct domains seen in the period."""
     since = _q(days)
     conn  = get_db()
     cur   = conn.cursor()
-    cur.execute(f"""
-        SELECT DISTINCT domain FROM reports
-        WHERE date_end >= {PH}
-        ORDER BY domain
-    """, (since,))
+    cur.execute(f"SELECT DISTINCT domain FROM reports WHERE date_end >= {PH} ORDER BY domain", (since,))
     rows = fetchall_dict(cur)
     cur.close(); conn.close()
     return [r["domain"] for r in rows]
@@ -502,8 +506,8 @@ def list_domains(days: int = 30):
 def overview(days: int = 30, domain: str = ""):
     since = _q(days)
     dc, dp = _domain_clause(domain)
-    conn  = get_db()
-    cur   = conn.cursor()
+    conn   = get_db()
+    cur    = conn.cursor()
 
     cur.execute(f"""
         SELECT COALESCE(SUM(r.count),0) FROM records r
@@ -534,14 +538,10 @@ def overview(days: int = 30, domain: str = ""):
     """, [since] + dp)
     spf_pass = fetchone_val(cur)
 
-    if domain:
-        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_end >= {PH}{dc}", [since] + dp)
-    else:
-        cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_end >= {PH}", (since,))
+    cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_end >= {PH}{dc}", [since] + dp)
     report_count = fetchone_val(cur)
 
     cur.close(); conn.close()
-
     disp = {row["disposition"]: row["n"] for row in by_disp}
     return {
         "total_messages": total_messages,
@@ -557,8 +557,8 @@ def overview(days: int = 30, domain: str = ""):
 def timeline(days: int = 30, domain: str = ""):
     since = _q(days)
     dc, dp = _domain_clause(domain)
-    conn  = get_db()
-    cur   = conn.cursor()
+    conn   = get_db()
+    cur    = conn.cursor()
 
     if DB_BACKEND == "postgres":
         cur.execute(f"""
@@ -593,8 +593,8 @@ def timeline(days: int = 30, domain: str = ""):
 def by_domain(days: int = 30, domain: str = ""):
     since = _q(days)
     dc, dp = _domain_clause(domain)
-    conn  = get_db()
-    cur   = conn.cursor()
+    conn   = get_db()
+    cur    = conn.cursor()
     cur.execute(f"""
         SELECT p.domain, r.disposition, COALESCE(SUM(r.count),0) as n
         FROM records r JOIN reports p ON r.report_id=p.report_id
@@ -617,8 +617,8 @@ def by_domain(days: int = 30, domain: str = ""):
 def sources(days: int = 30, limit: int = 100, domain: str = ""):
     since = _q(days)
     dc, dp = _domain_clause(domain)
-    conn  = get_db()
-    cur   = conn.cursor()
+    conn   = get_db()
+    cur    = conn.cursor()
 
     if DB_BACKEND == "postgres":
         cur.execute(f"""
@@ -652,8 +652,8 @@ def sources(days: int = 30, limit: int = 100, domain: str = ""):
 def geo(days: int = 30, domain: str = ""):
     since = _q(days)
     dc, dp = _domain_clause(domain)
-    conn  = get_db()
-    cur   = conn.cursor()
+    conn   = get_db()
+    cur    = conn.cursor()
     cur.execute(f"""
         SELECT r.geo_lat, r.geo_lon, r.geo_country,
                r.disposition, COALESCE(SUM(r.count),0) as total
@@ -670,8 +670,8 @@ def geo(days: int = 30, domain: str = ""):
 def alerts(days: int = 30, domain: str = ""):
     since = _q(days)
     dc, dp = _domain_clause(domain)
-    conn  = get_db()
-    cur   = conn.cursor()
+    conn   = get_db()
+    cur    = conn.cursor()
 
     cur.execute(f"""
         SELECT p.domain, p.policy_p, r.disposition, SUM(r.count) as n
@@ -689,6 +689,55 @@ def alerts(days: int = 30, domain: str = ""):
 
     cur.close(); conn.close()
     return {"failing_deliveries": failing, "unenforced_policies": not_enforced}
+
+
+@app.get("/api/rejects")
+def rejects(days: int = 30, domain: str = "", limit: int = 500):
+    """
+    Detailed view of records with disposition=reject (or quarantine).
+    Joins records with reports to expose the IMAP envelope fields
+    (imap_from, imap_to, imap_subject) saved at import time.
+    """
+    since = _q(days)
+    dc, dp = _domain_clause(domain)
+    conn   = get_db()
+    cur    = conn.cursor()
+
+    cur.execute(f"""
+        SELECT
+            p.domain,
+            p.org_name,
+            p.policy_p,
+            p.imap_from,
+            p.imap_to,
+            p.imap_subject,
+            p.date_begin,
+            p.date_end,
+            r.source_ip,
+            r.count,
+            r.disposition,
+            r.dkim_result,
+            r.spf_result,
+            r.header_from,
+            r.envelope_from,
+            r.geo_country
+        FROM records r
+        JOIN reports p ON r.report_id = p.report_id
+        WHERE p.date_end >= {PH}{dc}
+          AND r.disposition IN ('reject', 'quarantine')
+        ORDER BY p.date_end DESC, r.count DESC
+        LIMIT {PH}
+    """, [since] + dp + [limit])
+
+    rows = fetchall_dict(cur)
+    cur.close(); conn.close()
+
+    # Format timestamps for readability
+    for row in rows:
+        for col in ("date_begin", "date_end"):
+            if row.get(col):
+                row[col + "_str"] = datetime.utcfromtimestamp(row[col]).strftime("%Y-%m-%d")
+    return rows
 
 
 @app.get("/api/fetch_log")
@@ -712,7 +761,6 @@ def db_info():
     return {"backend": DB_BACKEND, "host": PG_HOST if DB_BACKEND == "postgres" else "local"}
 
 
-# Serve React SPA
 try:
     app.mount("/", StaticFiles(directory="/app/frontend", html=True), name="static")
 except Exception:

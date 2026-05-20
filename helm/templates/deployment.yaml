@@ -21,7 +21,6 @@ spec:
           ports:
             - containerPort: 8000
           env:
-            # ── IMAP ──────────────────────────────────────────────────────
             - name: IMAP_HOST
               value: {{ .Values.imap.host | quote }}
             - name: IMAP_PORT
@@ -41,16 +40,12 @@ spec:
               value: {{ .Values.imap.useSSL | quote }}
             - name: POLL_INTERVAL_SECONDS
               value: {{ .Values.imap.pollIntervalSeconds | quote }}
-
-            # ── Database ──────────────────────────────────────────────────
             - name: DB_BACKEND
               value: {{ .Values.db.backend | quote }}
-
             {{- if eq .Values.db.backend "sqlite" }}
             - name: DB_PATH
               value: {{ .Values.db.sqlite.path | quote }}
             {{- end }}
-
             {{- if eq .Values.db.backend "postgres" }}
             - name: PG_HOST
               value: {{ .Values.db.postgres.host | quote }}
@@ -68,7 +63,6 @@ spec:
             - name: PG_SSLMODE
               value: {{ .Values.db.postgres.sslmode | quote }}
             {{- end }}
-
           volumeMounts:
             - name: data
               mountPath: /data

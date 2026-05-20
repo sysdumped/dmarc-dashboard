@@ -9,14 +9,13 @@ async function apiFetch(path) {
 }
 
 export function useApi(path, deps = [], refreshInterval = 0) {
-  const [data, setData] = useState(null);
+  const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError]     = useState(null);
 
   const load = useCallback(async () => {
     try {
-      setLoading(true);
-      setError(null);
+      setLoading(true); setError(null);
       const d = await apiFetch(path);
       setData(d);
     } catch (e) {

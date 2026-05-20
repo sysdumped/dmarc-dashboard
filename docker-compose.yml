@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   dmarc-dashboard:
     build: .
@@ -16,8 +14,9 @@ services:
       IMAP_USER: "${IMAP_USER}"
       IMAP_PASS: "${IMAP_PASS}"
       IMAP_FOLDER: "${IMAP_FOLDER:-INBOX}"
+      IMAP_PROCESSED_FOLDER: "${IMAP_PROCESSED_FOLDER:-Processed}"
       IMAP_USE_SSL: "${IMAP_USE_SSL:-true}"
       POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
-
+      DB_BACKEND: "${DB_BACKEND:-sqlite}"
 volumes:
   dmarc-data:

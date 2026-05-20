@@ -1,21 +1,17 @@
 replicaCount: 1
-
 image:
   repository: "your-registry/dmarc-dashboard"
   tag: "latest"
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 8000
-
 ingress:
   enabled: true
   className: "nginx"
   host: "dmarc.example.com"
   tls: true
   tlsSecret: "dmarc-dashboard-tls"
-
 imap:
   host: ""
   port: 993
@@ -25,14 +21,10 @@ imap:
   processedFolder: "Processed"
   useSSL: true
   pollIntervalSeconds: 300
-
-# DB backend: "sqlite" o "postgres"
 db:
   backend: "sqlite"
-  # SQLite — usato solo se backend=sqlite
   sqlite:
     path: "/data/dmarc.db"
-  # PostgreSQL — usato solo se backend=postgres
   postgres:
     host: ""
     port: 5432
@@ -40,13 +32,11 @@ db:
     user: "dmarc"
     password: ""
     sslmode: "prefer"
-
 persistence:
   enabled: true
   storageClass: "longhorn"
   size: "2Gi"
   accessMode: ReadWriteOnce
-
 resources:
   requests:
     cpu: "100m"

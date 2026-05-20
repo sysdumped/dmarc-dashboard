@@ -12,7 +12,6 @@ spec:
       targetPort: 8000
       protocol: TCP
       name: http
-
 ---
 {{- if .Values.persistence.enabled }}
 apiVersion: v1
@@ -27,7 +26,6 @@ spec:
     requests:
       storage: {{ .Values.persistence.size }}
 {{- end }}
-
 ---
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
