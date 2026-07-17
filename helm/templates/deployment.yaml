@@ -13,6 +13,8 @@ spec:
     metadata:
       labels:
         app: {{ include "dmarc-dashboard.fullname" . }}
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
     spec:
       containers:
         - name: dmarc-dashboard
@@ -45,12 +47,10 @@ spec:
             # ── Database ──────────────────────────────────────────────────
             - name: DB_BACKEND
               value: {{ .Values.db.backend | quote }}
-
             {{- if eq .Values.db.backend "sqlite" }}
             - name: DB_PATH
               value: {{ .Values.db.sqlite.path | quote }}
             {{- end }}
-
             {{- if eq .Values.db.backend "postgres" }}
             - name: PG_HOST
               value: {{ .Values.db.postgres.host | quote }}
@@ -67,6 +67,32 @@ spec:
                   key: password
             - name: PG_SSLMODE
               value: {{ .Values.db.postgres.sslmode | quote }}
+            {{- end }}
+
+            # ── OIDC ──────────────────────────────────────────────────────
+            - name: OIDC_ENABLED
+              value: {{ .Values.oidc.enabled | quote }}
+            {{- if .Values.oidc.enabled }}
+            - name: OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientId | quote }}
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dmarc-dashboard.fullname" . }}-oidc
+                  key: clientSecret
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dmarc-dashboard.fullname" . }}-oidc
+                  key: sessionSecret
+            - name: OIDC_REDIRECT_URI
+              value: {{ .Values.oidc.redirectUri | quote }}
+            - name: OIDC_SCOPES
+              value: {{ .Values.oidc.scopes | quote }}
+            - name: SESSION_MAX_AGE
+              value: {{ .Values.oidc.sessionMaxAge | quote }}
             {{- end }}
 
           volumeMounts:

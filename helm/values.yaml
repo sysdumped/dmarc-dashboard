@@ -26,13 +26,10 @@ imap:
   useSSL: true
   pollIntervalSeconds: 300
 
-# DB backend: "sqlite" o "postgres"
 db:
   backend: "sqlite"
-  # SQLite — usato solo se backend=sqlite
   sqlite:
     path: "/data/dmarc.db"
-  # PostgreSQL — usato solo se backend=postgres
   postgres:
     host: ""
     port: 5432
@@ -40,6 +37,17 @@ db:
     user: "dmarc"
     password: ""
     sslmode: "prefer"
+
+# OIDC authentication
+oidc:
+  enabled: false
+  issuer: ""           # es. https://keycloak.example.com/realms/myrealm
+  clientId: ""
+  clientSecret: ""
+  redirectUri: ""      # es. https://dmarc.example.com/auth/callback
+  scopes: "openid profile email"
+  sessionSecret: ""    # lascia vuoto per auto-generare (non persistente tra restart)
+  sessionMaxAge: 28800 # 8 ore in secondi
 
 persistence:
   enabled: true
