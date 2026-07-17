@@ -171,6 +171,8 @@ app.add_middleware(
     max_age=SESSION_MAX_AGE,
     https_only=False,
     same_site="lax",
+    # Explicit cookie name helps avoid conflicts when multiple apps share domain
+    session_cookie="dmarc_session",
 )
 
 # ---------------------------------------------------------------------------
@@ -190,16 +192,25 @@ async def auth_callback(request: Request):
     if not OIDC_ENABLED:
         return RedirectResponse(url="/")
     try:
-        token = await oauth.oidc.authorize_access_token(request)
+        import logging
+        log = logging.getLogger("dmarc.oidc")
+        log.info(f"Callback — session keys: {list(request.session.keys())} | params: {dict(request.query_params)}")
+
+        # Pass redirect_uri explicitly so authlib does not need to rebuild it
+        redirect_uri = OIDC_REDIRECT_URI or str(request.url_for("auth_callback"))
+        token = await oauth.oidc.authorize_access_token(request, redirect_uri=redirect_uri)
         userinfo = token.get("userinfo") or await oauth.oidc.userinfo(token=token)
-        # Store minimal user info in session
         request.session["user"] = {
             "sub":   userinfo.get("sub", ""),
             "name":  userinfo.get("name") or userinfo.get("preferred_username", ""),
             "email": userinfo.get("email", ""),
         }
+        log.info(f"Login OK — user: {request.session['user'].get('email')}")
         return RedirectResponse(url="/")
     except Exception as e:
+        import traceback, logging
+        detail = traceback.format_exc()
+        logging.getLogger("dmarc.oidc").error(f"Callback error: {detail}")
         return HTMLResponse(
             f"<h3>Autenticazione fallita</h3><pre>{e}</pre><a href='/auth/login'>Riprova</a>",
             status_code=400,

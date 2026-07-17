@@ -23,4 +23,4 @@ ENV DB_PATH=/data/dmarc.db \
     OIDC_ENABLED="false" OIDC_ISSUER="" OIDC_CLIENT_ID="" \
     OIDC_CLIENT_SECRET="" OIDC_REDIRECT_URI="" \
     OIDC_SCOPES="openid profile email" SESSION_MAX_AGE="28800"
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
