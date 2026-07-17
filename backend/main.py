@@ -63,6 +63,18 @@ _PUBLIC_PATHS = {"/auth/login", "/auth/callback", "/auth/logout", "/api/healthz"
 # OIDC CLIENT SETUP
 # ---------------------------------------------------------------------------
 
+import httpx as _httpx
+from authlib.integrations.httpx_client import AsyncOAuth2Client as _AsyncOAuth2Client
+
+# Subclass AsyncOAuth2Client to inject a longer timeout for k8s environments
+# where DNS resolution + TLS handshake can exceed authlib's default 5s.
+class _TimeoutClient(_AsyncOAuth2Client):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("timeout", _httpx.Timeout(
+            connect=20.0, read=20.0, write=10.0, pool=5.0
+        ))
+        super().__init__(*args, **kwargs)
+
 oauth = OAuth()
 
 if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
@@ -72,6 +84,7 @@ if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
         client_secret=OIDC_CLIENT_SECRET,
         server_metadata_url=f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration",
         client_kwargs={"scope": OIDC_SCOPES},
+        async_client_cls=_TimeoutClient,
     )
 
 # ---------------------------------------------------------------------------
