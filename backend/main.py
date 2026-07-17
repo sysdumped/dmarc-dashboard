@@ -14,6 +14,7 @@ import secrets
 import json
 
 from fastapi import FastAPI, BackgroundTasks, Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -59,25 +60,6 @@ SESSION_MAX_AGE       = int(os.environ.get("SESSION_MAX_AGE", str(8 * 3600)))  #
 _PUBLIC_PATHS = {"/auth/login", "/auth/callback", "/auth/logout"}
 
 # ---------------------------------------------------------------------------
-# SESSION MIDDLEWARE (always added — harmless if OIDC disabled)
-# ---------------------------------------------------------------------------
-
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=SESSION_SECRET,
-    max_age=SESSION_MAX_AGE,
-    https_only=False,   # set True in production via env if behind HTTPS
-    same_site="lax",
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------------------------------------------------------
 # OIDC CLIENT SETUP
 # ---------------------------------------------------------------------------
 
@@ -93,40 +75,60 @@ if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
     )
 
 # ---------------------------------------------------------------------------
-# AUTH MIDDLEWARE
+# MIDDLEWARE STACK
+#
+# Starlette builds the chain in REVERSE registration order — the LAST
+# add_middleware() call becomes the OUTERMOST layer (executes first).
+#
+# Desired execution order (outermost first):
+#   SessionMiddleware -> CORSMiddleware -> _AuthMiddleware -> app
+#
+# So we register innermost first:
+#   1. _AuthMiddleware  (first registered = innermost = runs last)
+#   2. CORSMiddleware
+#   3. SessionMiddleware (last registered = outermost = runs FIRST,
+#      populating request.session before _AuthMiddleware sees it)
 # ---------------------------------------------------------------------------
 
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    path = request.url.path
+class _AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
 
-    # OIDC disabled → let everything through
-    if not OIDC_ENABLED:
-        return await call_next(request)
+        if not OIDC_ENABLED:
+            return await call_next(request)
 
-    # Public auth paths are always allowed
-    if path in _PUBLIC_PATHS:
-        return await call_next(request)
+        if path in _PUBLIC_PATHS or path.startswith("/static/") or path in ("/favicon.ico",):
+            return await call_next(request)
 
-    # Static assets served by StaticFiles (js, css, media)
-    if path.startswith("/static/") or path in ("/favicon.ico",):
-        return await call_next(request)
+        if request.session.get("user"):
+            return await call_next(request)
 
-    # Check session
-    user = request.session.get("user")
-    if user:
-        return await call_next(request)
+        if path.startswith("/api/"):
+            return Response(
+                content=json.dumps({"detail": "Not authenticated"}),
+                status_code=401,
+                media_type="application/json",
+            )
 
-    # For API calls return 401 (frontend can redirect)
-    if path.startswith("/api/"):
-        return Response(
-            content=json.dumps({"detail": "Not authenticated"}),
-            status_code=401,
-            media_type="application/json",
-        )
+        return RedirectResponse(url="/auth/login")
 
-    # For browser navigation redirect to login
-    return RedirectResponse(url="/auth/login")
+
+app.add_middleware(_AuthMiddleware)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    max_age=SESSION_MAX_AGE,
+    https_only=False,
+    same_site="lax",
+)
 
 # ---------------------------------------------------------------------------
 # AUTH ENDPOINTS
