@@ -64,28 +64,58 @@ _PUBLIC_PATHS = {"/auth/login", "/auth/callback", "/auth/logout", "/api/healthz"
 # ---------------------------------------------------------------------------
 
 import httpx as _httpx
-from authlib.integrations.httpx_client import AsyncOAuth2Client as _AsyncOAuth2Client
 
-# Subclass AsyncOAuth2Client to inject a longer timeout for k8s environments
-# where DNS resolution + TLS handshake can exceed authlib's default 5s.
-class _TimeoutClient(_AsyncOAuth2Client):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("timeout", _httpx.Timeout(
-            connect=20.0, read=20.0, write=10.0, pool=5.0
-        ))
-        super().__init__(*args, **kwargs)
+# ---------------------------------------------------------------------------
+# authlib's StarletteRemoteApp calls load_server_metadata() which internally
+# does: async with self._get_oauth_client() as client: client.request(...)
+# The client is built fresh each time with no timeout argument, so the httpx
+# default (5 s) is used — too short for DNS + TLS in k8s.
+#
+# Fix: monkey-patch the metadata fetch to use a long-lived shared client
+# that has explicit timeouts. We wrap load_server_metadata on the app object
+# after registration (see below, post-registration patch).
+# ---------------------------------------------------------------------------
+
+_OIDC_TIMEOUT = _httpx.Timeout(connect=30.0, read=30.0, write=10.0, pool=5.0)
+_shared_httpx: _httpx.AsyncClient | None = None
+
+
+def _get_shared_httpx() -> _httpx.AsyncClient:
+    global _shared_httpx
+    if _shared_httpx is None or _shared_httpx.is_closed:
+        _shared_httpx = _httpx.AsyncClient(timeout=_OIDC_TIMEOUT, verify=True)
+    return _shared_httpx
+
 
 oauth = OAuth()
 
 if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
+    _metadata_url = f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration"
+
     oauth.register(
         name="oidc",
         client_id=OIDC_CLIENT_ID,
         client_secret=OIDC_CLIENT_SECRET,
-        server_metadata_url=f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration",
+        server_metadata_url=_metadata_url,
         client_kwargs={"scope": OIDC_SCOPES},
-        async_client_cls=_TimeoutClient,
     )
+
+    # Patch load_server_metadata to use our shared client with proper timeouts.
+    # authlib caches the result in _server_metadata after first fetch, so this
+    # only fires once per process lifetime.
+    _original_load = oauth.oidc.load_server_metadata
+
+    async def _patched_load_server_metadata():
+        if oauth.oidc._server_metadata:          # already cached
+            return oauth.oidc._server_metadata
+        client = _get_shared_httpx()
+        resp = await client.get(_metadata_url)
+        resp.raise_for_status()
+        metadata = resp.json()
+        oauth.oidc._server_metadata = metadata   # cache it
+        return metadata
+
+    oauth.oidc.load_server_metadata = _patched_load_server_metadata
 
 # ---------------------------------------------------------------------------
 # MIDDLEWARE STACK
