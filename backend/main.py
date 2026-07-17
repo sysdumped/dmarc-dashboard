@@ -100,22 +100,22 @@ if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
         client_kwargs={"scope": OIDC_SCOPES},
     )
 
-    # Patch load_server_metadata to use our shared client with proper timeouts.
-    # authlib caches the result in _server_metadata after first fetch, so this
-    # only fires once per process lifetime.
-    _original_load = oauth.oidc.load_server_metadata
+    # Replace authlib's load_server_metadata with our own implementation
+    # that uses a shared httpx client with generous timeouts.
+    # The replacement caches the result in a simple closure variable so
+    # subsequent calls are instant — no authlib internals involved.
+    _cached_metadata: dict = {}
 
-    async def _patched_load_server_metadata():
-        if oauth.oidc._server_metadata:          # already cached
-            return oauth.oidc._server_metadata
+    async def _load_server_metadata_with_timeout():
+        if _cached_metadata:
+            return _cached_metadata
         client = _get_shared_httpx()
         resp = await client.get(_metadata_url)
         resp.raise_for_status()
-        metadata = resp.json()
-        oauth.oidc._server_metadata = metadata   # cache it
-        return metadata
+        _cached_metadata.update(resp.json())
+        return _cached_metadata
 
-    oauth.oidc.load_server_metadata = _patched_load_server_metadata
+    oauth.oidc.load_server_metadata = _load_server_metadata_with_timeout
 
 # ---------------------------------------------------------------------------
 # MIDDLEWARE STACK
