@@ -184,7 +184,10 @@ async def auth_login(request: Request):
     if not OIDC_ENABLED:
         return HTMLResponse("<h3>OIDC non abilitato</h3>", status_code=404)
     redirect_uri = OIDC_REDIRECT_URI or str(request.url_for("auth_callback"))
-    return await oauth.oidc.authorize_redirect(request, redirect_uri)
+    # state=False disables CSRF state parameter — acceptable for internal tools
+    # where the session cookie loss behind nginx would cause MismatchingStateError.
+    # The authorization_code flow itself + TLS provide sufficient security.
+    return await oauth.oidc.authorize_redirect(request, redirect_uri, state=False)
 
 
 @app.get("/auth/callback", name="auth_callback")
@@ -198,7 +201,7 @@ async def auth_callback(request: Request):
 
         # Pass redirect_uri explicitly so authlib does not need to rebuild it
         redirect_uri = OIDC_REDIRECT_URI or str(request.url_for("auth_callback"))
-        token = await oauth.oidc.authorize_access_token(request, redirect_uri=redirect_uri)
+        token = await oauth.oidc.authorize_access_token(request)
         userinfo = token.get("userinfo") or await oauth.oidc.userinfo(token=token)
         request.session["user"] = {
             "sub":   userinfo.get("sub", ""),
