@@ -183,37 +183,66 @@ app.add_middleware(
 async def auth_login(request: Request):
     if not OIDC_ENABLED:
         return HTMLResponse("<h3>OIDC non abilitato</h3>", status_code=404)
+    metadata = await oauth.oidc.load_server_metadata()
     redirect_uri = OIDC_REDIRECT_URI or str(request.url_for("auth_callback"))
-    # state=False disables CSRF state parameter — acceptable for internal tools
-    # where the session cookie loss behind nginx would cause MismatchingStateError.
-    # The authorization_code flow itself + TLS provide sufficient security.
-    return await oauth.oidc.authorize_redirect(request, redirect_uri, state=False)
+    state = secrets.token_urlsafe(24)
+    from urllib.parse import urlencode
+    url = f"{metadata['authorization_endpoint']}?{urlencode({'response_type':'code','client_id':OIDC_CLIENT_ID,'redirect_uri':redirect_uri,'scope':OIDC_SCOPES,'state':state})}"
+    response = RedirectResponse(url=url)
+    response.set_cookie("oidc_state", state, max_age=300, httponly=True, samesite="lax", secure=False)
+    return response
 
 
 @app.get("/auth/callback", name="auth_callback")
 async def auth_callback(request: Request):
     if not OIDC_ENABLED:
         return RedirectResponse(url="/")
+    import logging
+    log = logging.getLogger("dmarc.oidc")
     try:
-        import logging
-        log = logging.getLogger("dmarc.oidc")
-        log.info(f"Callback — session keys: {list(request.session.keys())} | params: {dict(request.query_params)}")
-
-        # Pass redirect_uri explicitly so authlib does not need to rebuild it
+        state_cookie = request.cookies.get("oidc_state", "")
+        state_param  = request.query_params.get("state", "")
+        log.info(f"Callback state cookie={state_cookie!r} param={state_param!r}")
+        if not state_cookie or state_cookie != state_param:
+            return HTMLResponse(
+                "<h3>Sessione scaduta o errore CSRF</h3><a href='/auth/login'>Riprova</a>",
+                status_code=400,
+            )
+        code = request.query_params.get("code")
+        if not code:
+            return HTMLResponse("<h3>Codice autorizzazione mancante</h3>", status_code=400)
         redirect_uri = OIDC_REDIRECT_URI or str(request.url_for("auth_callback"))
-        token = await oauth.oidc.authorize_access_token(request)
-        userinfo = token.get("userinfo") or await oauth.oidc.userinfo(token=token)
+        metadata = await oauth.oidc.load_server_metadata()
+        client = _get_shared_httpx()
+        token_resp = await client.post(
+            metadata["token_endpoint"],
+            data={"grant_type":"authorization_code","code":code,"redirect_uri":redirect_uri,
+                  "client_id":OIDC_CLIENT_ID,"client_secret":OIDC_CLIENT_SECRET},
+            headers={"Accept":"application/json"},
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+        access_token = token_data.get("access_token")
+        if not access_token:
+            raise ValueError(f"No access_token: {token_data}")
+        userinfo_resp = await client.get(
+            metadata["userinfo_endpoint"],
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        userinfo_resp.raise_for_status()
+        userinfo = userinfo_resp.json()
         request.session["user"] = {
             "sub":   userinfo.get("sub", ""),
             "name":  userinfo.get("name") or userinfo.get("preferred_username", ""),
             "email": userinfo.get("email", ""),
         }
-        log.info(f"Login OK — user: {request.session['user'].get('email')}")
-        return RedirectResponse(url="/")
+        log.info(f"Login OK: {request.session['user'].get('email')}")
+        response = RedirectResponse(url="/")
+        response.delete_cookie("oidc_state")
+        return response
     except Exception as e:
-        import traceback, logging
-        detail = traceback.format_exc()
-        logging.getLogger("dmarc.oidc").error(f"Callback error: {detail}")
+        import traceback
+        log.error(f"Callback error: {traceback.format_exc()}")
         return HTMLResponse(
             f"<h3>Autenticazione fallita</h3><pre>{e}</pre><a href='/auth/login'>Riprova</a>",
             status_code=400,
