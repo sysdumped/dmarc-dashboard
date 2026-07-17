@@ -1,6 +1,41 @@
 import React from 'react';
-import{BarChart,Bar,XAxis,YAxis,CartesianGrid,Tooltip,Legend,ResponsiveContainer}from 'recharts';
-export default function DomainChart({data}){
-  const sorted=(data||[]).map(d=>({...d,total:(d.none||0)+(d.quarantine||0)+(d.reject||0)})).sort((a,b)=>b.total-a.total).slice(0,10);
-  return(<div className="chart-card"><h3 className="chart-title">Disposizione per dominio</h3><ResponsiveContainer width="100%" height={260}><BarChart data={sorted} layout="vertical" margin={{top:0,right:20,bottom:0,left:80}}><CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" horizontal={false}/><XAxis type="number" tick={{fill:'#94a3b8',fontSize:11}} axisLine={false} tickLine={false}/><YAxis type="category" dataKey="domain" tick={{fill:'#cbd5e1',fontSize:11}} axisLine={false} tickLine={false} width={80}/><Tooltip contentStyle={{background:'#1e293b',border:'1px solid #334155',borderRadius:8}} labelStyle={{color:'#e2e8f0'}} itemStyle={{color:'#94a3b8'}} formatter={(v,n)=>[v,{none:'Consegnati',quarantine:'Quarantena',reject:'Rifiutati'}[n]||n]}/><Legend wrapperStyle={{fontSize:12,color:'#94a3b8'}} formatter={v=>({none:'Consegnati',quarantine:'Quarantena',reject:'Rifiutati'}[v]||v)}/><Bar dataKey="none" name="none" stackId="a" fill="#60a5fa"/><Bar dataKey="quarantine" name="quarantine" stackId="a" fill="#fbbf24"/><Bar dataKey="reject" name="reject" stackId="a" fill="#f87171" radius={[0,4,4,0]}/></BarChart></ResponsiveContainer></div>);
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+} from 'recharts';
+
+export default function DomainChart({ data }) {
+  const sorted = (data || [])
+    .map((d) => ({ ...d, total: (d.none || 0) + (d.quarantine || 0) + (d.reject || 0) }))
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 10);
+
+  return (
+    <div className="chart-card">
+      <h3 className="chart-title">Disposizione per dominio</h3>
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={sorted} layout="vertical" margin={{ top: 0, right: 20, bottom: 0, left: 80 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" horizontal={false} />
+          <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
+          <YAxis
+            type="category" dataKey="domain"
+            tick={{ fill: '#cbd5e1', fontSize: 11 }}
+            axisLine={false} tickLine={false} width={80}
+          />
+          <Tooltip
+            contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }}
+            labelStyle={{ color: '#e2e8f0' }}
+            itemStyle={{ color: '#94a3b8' }}
+            formatter={(v, n) => [v, { none: 'Consegnati', quarantine: 'Quarantena', reject: 'Rifiutati' }[n] || n]}
+          />
+          <Legend
+            wrapperStyle={{ fontSize: 12, color: '#94a3b8' }}
+            formatter={(v) => ({ none: 'Consegnati', quarantine: 'Quarantena', reject: 'Rifiutati' }[v] || v)}
+          />
+          <Bar dataKey="none" name="none" stackId="a" fill="#60a5fa" radius={[0, 0, 0, 0]} />
+          <Bar dataKey="quarantine" name="quarantine" stackId="a" fill="#fbbf24" />
+          <Bar dataKey="reject" name="reject" stackId="a" fill="#f87171" radius={[0, 4, 4, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
 }

@@ -1,13 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApi, triggerFetch } from './hooks/useApi';
-import OverviewCards  from './components/OverviewCards';
-import TimelineChart  from './components/TimelineChart';
-import DomainChart    from './components/DomainChart';
-import GeoMap         from './components/GeoMap';
-import SourcesTable   from './components/SourcesTable';
-import AlertsPanel    from './components/AlertsPanel';
-import RejectDetail   from './components/RejectDetail';
-import UserMenu       from './components/UserMenu';
+import OverviewCards from './components/OverviewCards';
+import TimelineChart from './components/TimelineChart';
+import DomainChart from './components/DomainChart';
+import GeoMap from './components/GeoMap';
+import SourcesTable from './components/SourcesTable';
+import AlertsPanel from './components/AlertsPanel';
 import './App.css';
 
 const DAYS_OPTIONS = [1, 7, 14, 30, 90];
@@ -23,17 +21,20 @@ function DomainSearch({ days, value, onChange }) {
   const [open, setOpen]   = useState(false);
   const boxRef            = useRef(null);
   const { data: allDomains } = useApi(`/api/stats/domains?days=${days}`, [days]);
-  const suggestions = (allDomains || []).filter(d => d.toLowerCase().includes(input.toLowerCase()) && d !== input);
+
+  const suggestions = (allDomains || []).filter(
+    (d) => d.toLowerCase().includes(input.toLowerCase()) && d !== input
+  );
 
   useEffect(() => { setInput(value); }, [value]);
   useEffect(() => {
-    const h = e => { if (!boxRef.current?.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
+    const handler = (e) => { if (!boxRef.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const select = d => { setInput(d); onChange(d); setOpen(false); };
-  const clear  = ()  => { setInput(''); onChange(''); setOpen(false); };
+  const select = (d) => { setInput(d); onChange(d); setOpen(false); };
+  const clear   = () => { setInput(''); onChange(''); setOpen(false); };
 
   return (
     <div className="domain-search" ref={boxRef}>
@@ -43,13 +44,20 @@ function DomainSearch({ days, value, onChange }) {
           className="domain-input" placeholder="Filtra per dominio…" value={input}
           onChange={e => { setInput(e.target.value); setOpen(true); if (!e.target.value) onChange(''); }}
           onFocus={() => setOpen(true)}
-          onKeyDown={e => { if (e.key === 'Enter') { onChange(input); setOpen(false); } if (e.key === 'Escape') clear(); }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { onChange(input); setOpen(false); }
+            if (e.key === 'Escape') clear();
+          }}
         />
         {input && <button className="domain-clear" onClick={clear} title="Rimuovi filtro">✕</button>}
       </div>
       {open && suggestions.length > 0 && (
         <ul className="domain-suggestions">
-          {suggestions.map(d => <li key={d} onMouseDown={() => select(d)}><span className="sug-icon">◈</span> {d}</li>)}
+          {suggestions.map((d) => (
+            <li key={d} onMouseDown={() => select(d)}>
+              <span className="sug-icon">◈</span> {d}
+            </li>
+          ))}
         </ul>
       )}
       {value && <span className="domain-badge">Filtro attivo: <strong>{value}</strong></span>}
@@ -58,9 +66,8 @@ function DomainSearch({ days, value, onChange }) {
 }
 
 export default function App() {
-  const [days, setDays]         = useState(30);
-  const [domain, setDomain]     = useState('');
-  const [tab, setTab]           = useState('overview');
+  const [days, setDays]       = useState(30);
+  const [domain, setDomain]   = useState('');
   const [fetching, setFetching] = useState(false);
   const [lastFetch, setLastFetch] = useState(null);
 
@@ -86,8 +93,7 @@ export default function App() {
     } finally { setFetching(false); }
   };
 
-  const lastLog     = fetchLog?.[0];
-  const rejectCount = (rejects || []).length;
+  const lastLog = fetchLog?.[0];
 
   return (
     <div className="app">
@@ -106,8 +112,14 @@ export default function App() {
         </div>
         <div className="header-right">
           <div className="days-selector">
-            {DAYS_OPTIONS.map(d => (
-              <button key={d} className={`day-btn ${days === d ? 'active' : ''}`} onClick={() => setDays(d)}>{d}g</button>
+            {DAYS_OPTIONS.map((d) => (
+              <button
+                key={d}
+                className={`day-btn ${days === d ? 'active' : ''}`}
+                onClick={() => setDays(d)}
+              >
+                {d}g
+              </button>
             ))}
           </div>
           <button className={`fetch-btn ${fetching ? 'loading' : ''}`} onClick={handleFetchNow} disabled={fetching}>
@@ -118,32 +130,36 @@ export default function App() {
       </header>
 
       <main className="main">
-        <section className="section">{l1 ? <Spinner /> : <OverviewCards data={overview} />}</section>
-        <section className="section"><DomainSearch days={days} value={domain} onChange={setDomain} /></section>
+        {/* Overview cards */}
+        <section className="section">
+          {l1 ? <Spinner /> : <OverviewCards data={overview} />}
+        </section>
 
-        <div className="tab-bar">
-          {TABS.map(t => (
-            <button key={t.id} className={`tab-btn ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
-              {t.label}
-              {t.id === 'rejects' && rejectCount > 0 && <span className="tab-badge">{rejectCount}</span>}
-            </button>
-          ))}
-        </div>
+        {/* Domain search bar */}
+        <section className="section">
+          <DomainSearch days={days} value={domain} onChange={setDomain} />
+        </section>
 
-        {tab === 'overview' && (
-          <>
-            <section className="section">{l6 ? <Spinner /> : <AlertsPanel data={alerts} />}</section>
-            <section className="section">{l2 ? <Spinner /> : <TimelineChart data={timeline} />}</section>
-            <section className="section two-col">
-              <div>{l3 ? <Spinner /> : <DomainChart data={byDomain} />}</div>
-              <div className="geo-wrap">{l5 ? <Spinner /> : <GeoMap data={geo} />}</div>
-            </section>
-            <section className="section">{l4 ? <Spinner /> : <SourcesTable data={sources} />}</section>
-          </>
-        )}
-        {tab === 'rejects' && (
-          <section className="section">{l7 ? <Spinner /> : <RejectDetail data={rejects} />}</section>
-        )}
+        {/* Alerts */}
+        <section className="section">
+          {l6 ? <Spinner /> : <AlertsPanel data={alerts} />}
+        </section>
+
+        {/* Timeline */}
+        <section className="section">
+          {l2 ? <Spinner /> : <TimelineChart data={timeline} />}
+        </section>
+
+        {/* Domain chart + geo */}
+        <section className="section two-col">
+          <div>{l3 ? <Spinner /> : <DomainChart data={byDomain} />}</div>
+          <div className="geo-wrap">{l5 ? <Spinner /> : <GeoMap data={geo} />}</div>
+        </section>
+
+        {/* Sources table */}
+        <section className="section">
+          {l4 ? <Spinner /> : <SourcesTable data={sources} />}
+        </section>
 
         {lastFetch && <div className="toast">Sync avviato alle {lastFetch} — i dati si aggiorneranno tra pochi secondi.</div>}
       </main>

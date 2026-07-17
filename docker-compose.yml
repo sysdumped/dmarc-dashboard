@@ -17,14 +17,6 @@ services:
       IMAP_PROCESSED_FOLDER: "${IMAP_PROCESSED_FOLDER:-Processed}"
       IMAP_USE_SSL: "${IMAP_USE_SSL:-true}"
       POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
-      DB_BACKEND: "${DB_BACKEND:-sqlite}"
-      OIDC_ENABLED: "${OIDC_ENABLED:-false}"
-      OIDC_ISSUER: "${OIDC_ISSUER:-}"
-      OIDC_CLIENT_ID: "${OIDC_CLIENT_ID:-}"
-      OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
-      OIDC_REDIRECT_URI: "${OIDC_REDIRECT_URI:-}"
-      OIDC_SCOPES: "${OIDC_SCOPES:-openid profile email}"
-      SESSION_SECRET: "${SESSION_SECRET:-}"
-      SESSION_MAX_AGE: "${SESSION_MAX_AGE:-28800}"
+
 volumes:
   dmarc-data:
