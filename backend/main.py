@@ -57,7 +57,7 @@ SESSION_SECRET        = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 SESSION_MAX_AGE       = int(os.environ.get("SESSION_MAX_AGE", str(8 * 3600)))  # 8 ore
 
 # Paths that don't require authentication
-_PUBLIC_PATHS = {"/auth/login", "/auth/callback", "/auth/logout"}
+_PUBLIC_PATHS = {"/auth/login", "/auth/callback", "/auth/logout", "/api/healthz"}
 
 # ---------------------------------------------------------------------------
 # OIDC CLIENT SETUP
@@ -682,6 +682,11 @@ def rejects(days: int = 30, domain: str = "", limit: int = 500):
             if row.get(col):
                 row[col+"_str"] = datetime.utcfromtimestamp(row[col]).strftime("%Y-%m-%d")
     return rows
+
+
+@app.get("/api/healthz")
+def healthz():
+    return {"status": "ok"}
 
 
 @app.get("/api/fetch_log")
