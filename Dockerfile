@@ -15,14 +15,12 @@ COPY backend/main.py ./
 COPY --from=frontend-build /build/frontend/build ./frontend
 RUN mkdir -p /data
 EXPOSE 8000
-
 ENV DB_PATH=/data/dmarc.db \
-    IMAP_HOST="" \
-    IMAP_PORT="993" \
-    IMAP_USER="" \
-    IMAP_PASS="" \
-    IMAP_FOLDER="INBOX" \
-    IMAP_USE_SSL="true" \
-    POLL_INTERVAL_SECONDS="300"
-
+    IMAP_HOST="" IMAP_PORT="993" IMAP_USER="" IMAP_PASS="" \
+    IMAP_FOLDER="INBOX" IMAP_PROCESSED_FOLDER="Processed" \
+    IMAP_USE_SSL="true" POLL_INTERVAL_SECONDS="300" \
+    DB_BACKEND="sqlite" \
+    OIDC_ENABLED="false" OIDC_ISSUER="" OIDC_CLIENT_ID="" \
+    OIDC_CLIENT_SECRET="" OIDC_REDIRECT_URI="" \
+    OIDC_SCOPES="openid profile email" SESSION_MAX_AGE="28800"
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

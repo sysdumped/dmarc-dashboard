@@ -8,6 +8,8 @@ categories:
   - name: Risorse
 
 questions:
+
+  # ── Immagine ──────────────────────────────────────────────────────────────
   - variable: image.repository
     label: "Repository immagine"
     description: "es. gitea.example.com/myorg/dmarc-dashboard"
@@ -23,13 +25,11 @@ questions:
   - variable: image.pullPolicy
     label: "Pull policy"
     type: enum
-    options:
-      - "IfNotPresent"
-      - "Always"
-      - "Never"
+    options: ["IfNotPresent", "Always", "Never"]
     default: "IfNotPresent"
     group: "Immagine"
 
+  # ── IMAP ──────────────────────────────────────────────────────────────────
   - variable: imap.host
     label: "Server IMAP"
     description: "Hostname o IP del server IMAP"
@@ -57,14 +57,13 @@ questions:
     required: true
     group: "Connessione IMAP"
   - variable: imap.folder
-    label: "Cartella IMAP"
-    description: "Cartella in cui arrivano i report DMARC (es. INBOX o DMARC)"
+    label: "Cartella sorgente"
     type: string
     default: "INBOX"
     group: "Connessione IMAP"
   - variable: imap.processedFolder
     label: "Cartella messaggi processati"
-    description: "Cartella root (non sotto INBOX) dove spostare le email dopo l'importazione. Verrà creata automaticamente se non esiste."
+    description: "Cartella root (non sotto INBOX) dove spostare le email dopo l'importazione. Viene creata automaticamente."
     type: string
     default: "Processed"
     group: "Connessione IMAP"
@@ -76,13 +75,12 @@ questions:
     max: 3600
     group: "Connessione IMAP"
 
+  # ── Database ──────────────────────────────────────────────────────────────
   - variable: db.backend
     label: "Backend database"
-    description: "SQLite è zero-config e sufficiente per la maggior parte dei casi. PostgreSQL consigliato per volumi elevati o ambienti multi-istanza."
+    description: "SQLite è zero-config. PostgreSQL consigliato per volumi elevati."
     type: enum
-    options:
-      - "sqlite"
-      - "postgres"
+    options: ["sqlite", "postgres"]
     default: "sqlite"
     required: true
     group: "Database"
@@ -100,47 +98,56 @@ questions:
         label: "Nome database"
         type: string
         default: "dmarc"
-        required: true
-
       - variable: db.postgres.user
         label: "Utente"
         type: string
         default: "dmarc"
-        required: true
-
       - variable: db.postgres.password
-        label: "Password PostgreSQL"
-        description: "Verrà salvata in un Secret Kubernetes. Evita caratteri speciali shell come $ e !"
+        label: "Password"
         type: password
         required: true
       - variable: db.postgres.sslmode
         label: "SSL mode"
         type: enum
-        options:
-          - "disable"
-          - "allow"
-          - "prefer"
-          - "require"
-          - "verify-ca"
-          - "verify-full"
+        options: ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
         default: "prefer"
 
-  # ── Storage (PVC per SQLite) ───────────────────────────────────────────────
-  - variable: persistence.enabled
-    label: "Abilita persistenza dati"
-    description: "Necessario se usi SQLite. Con PostgreSQL puoi disabilitarla."
+  # ── OIDC ──────────────────────────────────────────────────────────────────
+  - variable: oidc.enabled
+    label: "Abilita autenticazione OIDC"
+    description: "Se abilitato, l'accesso alla dashboard richiede autenticazione tramite provider OIDC (Keycloak, Authentik, Dex, Google, ecc.)"
     type: boolean
     default: false
     group: "Autenticazione OIDC"
     show_subquestion_if: true
     subquestions:
-      - variable: persistence.storageClass
-        label: "Storage class"
-        type: storageclass
-        default: "longhorn"
+      - variable: oidc.issuer
+        label: "Issuer URL"
+        description: "URL base del provider OIDC. Deve esporre /.well-known/openid-configuration. Es: https://keycloak.example.com/realms/myrealm"
+        type: string
+        required: true
 
-      - variable: persistence.size
-        label: "Dimensione volume"
+      - variable: oidc.clientId
+        label: "Client ID"
+        description: "Client ID registrato nel provider OIDC"
+        type: string
+        required: true
+
+      - variable: oidc.clientSecret
+        label: "Client Secret"
+        description: "Client Secret del provider OIDC. Verrà salvato in un Secret Kubernetes."
+        type: password
+        required: true
+
+      - variable: oidc.redirectUri
+        label: "Redirect URI"
+        description: "Deve corrispondere esattamente a quanto registrato nel provider. Es: https://dmarc.example.com/auth/callback"
+        type: string
+        required: true
+
+      - variable: oidc.scopes
+        label: "Scopes OIDC"
+        description: "Scopes richiesti al provider (separati da spazio)"
         type: string
         default: "openid profile email"
 
@@ -155,6 +162,7 @@ questions:
         type: int
         default: 28800
 
+  # ── Ingress ───────────────────────────────────────────────────────────────
   - variable: ingress.enabled
     label: "Abilita Ingress"
     type: boolean
@@ -164,6 +172,7 @@ questions:
     subquestions:
       - variable: ingress.host
         label: "Hostname"
+        description: "es. dmarc.example.com"
         type: hostname
         required: true
       - variable: ingress.className
@@ -178,6 +187,24 @@ questions:
         label: "Nome Secret TLS"
         type: string
         default: "dmarc-dashboard-tls"
+
+  # ── Storage ───────────────────────────────────────────────────────────────
+  - variable: persistence.enabled
+    label: "Abilita persistenza dati"
+    description: "Necessario se usi SQLite. Con PostgreSQL puoi disabilitarla."
+    type: boolean
+    default: true
+    group: "Storage"
+    show_subquestion_if: true
+    subquestions:
+      - variable: persistence.storageClass
+        label: "Storage class"
+        type: storageclass
+        default: "longhorn"
+      - variable: persistence.size
+        label: "Dimensione volume"
+        type: string
+        default: "2Gi"
 
   # ── Risorse ───────────────────────────────────────────────────────────────
   - variable: resources.requests.cpu

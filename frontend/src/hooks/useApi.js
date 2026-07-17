@@ -16,10 +16,8 @@ export function useApi(path, deps = [], refreshInterval = 0) {
 
   const load = useCallback(async () => {
     try {
-      setLoading(true);
-      setError(null);
-      const d = await apiFetch(path);
-      setData(d);
+      setLoading(true); setError(null);
+      setData(await apiFetch(path));
     } catch (e) {
       if (e.message !== '401') setError(e.message);
     } finally {
