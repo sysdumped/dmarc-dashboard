@@ -1,21 +1,17 @@
 replicaCount: 1
-
 image:
   repository: "your-registry/dmarc-dashboard"
   tag: "latest"
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 8000
-
 ingress:
   enabled: true
   className: "nginx"
   host: "dmarc.example.com"
   tls: true
   tlsSecret: "dmarc-dashboard-tls"
-
 imap:
   host: ""
   port: 993
@@ -24,8 +20,8 @@ imap:
   folder: "INBOX"
   processedFolder: "Processed"
   useSSL: true
+  starttls: false
   pollIntervalSeconds: 300
-
 db:
   backend: "sqlite"
   sqlite:
@@ -37,24 +33,20 @@ db:
     user: "dmarc"
     password: ""
     sslmode: "prefer"
-
-# OIDC authentication
 oidc:
   enabled: false
-  issuer: ""           # es. https://keycloak.example.com/realms/myrealm
+  issuer: ""
   clientId: ""
   clientSecret: ""
-  redirectUri: ""      # es. https://dmarc.example.com/auth/callback
+  redirectUri: ""
   scopes: "openid profile email"
-  sessionSecret: ""    # lascia vuoto per auto-generare (non persistente tra restart)
-  sessionMaxAge: 28800 # 8 ore in secondi
-
+  sessionSecret: ""
+  sessionMaxAge: 28800
 persistence:
   enabled: true
   storageClass: "longhorn"
   size: "2Gi"
   accessMode: ReadWriteOnce
-
 resources:
   requests:
     cpu: "100m"

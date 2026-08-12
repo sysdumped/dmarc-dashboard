@@ -12,15 +12,17 @@ import email.header
 import imaplib
 import secrets
 import json
+import ssl as _ssl
 
 from fastapi import FastAPI, BackgroundTasks, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-import requests as http_requests
-from authlib.integrations.starlette_client import OAuth
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+import requests as http_requests
+import httpx as _httpx
+from authlib.integrations.starlette_client import OAuth
 
 app = FastAPI(title="DMARC Dashboard API")
 
@@ -35,6 +37,7 @@ IMAP_PASS             = os.environ.get("IMAP_PASS", "")
 IMAP_FOLDER           = os.environ.get("IMAP_FOLDER", "INBOX")
 IMAP_PROCESSED_FOLDER = os.environ.get("IMAP_PROCESSED_FOLDER", "Processed")
 IMAP_USE_SSL          = os.environ.get("IMAP_USE_SSL", "true").lower() == "true"
+IMAP_STARTTLS         = os.environ.get("IMAP_STARTTLS", "false").lower() == "true"
 POLL_INTERVAL         = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))
 
 DB_BACKEND  = os.environ.get("DB_BACKEND", "sqlite").lower()
@@ -46,38 +49,23 @@ PG_USER     = os.environ.get("PG_USER", "dmarc")
 PG_PASS     = os.environ.get("PG_PASS", "")
 PG_SSLMODE  = os.environ.get("PG_SSLMODE", "prefer")
 
-# OIDC
-OIDC_ENABLED          = os.environ.get("OIDC_ENABLED", "false").lower() == "true"
-OIDC_ISSUER           = os.environ.get("OIDC_ISSUER", "")           # es. https://keycloak.example.com/realms/myrealm
-OIDC_CLIENT_ID        = os.environ.get("OIDC_CLIENT_ID", "")
-OIDC_CLIENT_SECRET    = os.environ.get("OIDC_CLIENT_SECRET", "")
-OIDC_REDIRECT_URI     = os.environ.get("OIDC_REDIRECT_URI", "")     # es. https://dmarc.example.com/auth/callback
-OIDC_SCOPES           = os.environ.get("OIDC_SCOPES", "openid profile email")
-SESSION_SECRET        = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
-SESSION_MAX_AGE       = int(os.environ.get("SESSION_MAX_AGE", str(8 * 3600)))  # 8 ore
+OIDC_ENABLED       = os.environ.get("OIDC_ENABLED", "false").lower() == "true"
+OIDC_ISSUER        = os.environ.get("OIDC_ISSUER", "")
+OIDC_CLIENT_ID     = os.environ.get("OIDC_CLIENT_ID", "")
+OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
+OIDC_REDIRECT_URI  = os.environ.get("OIDC_REDIRECT_URI", "")
+OIDC_SCOPES        = os.environ.get("OIDC_SCOPES", "openid profile email")
+SESSION_SECRET     = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
+SESSION_MAX_AGE    = int(os.environ.get("SESSION_MAX_AGE", str(8 * 3600)))
 
-# Paths that don't require authentication
 _PUBLIC_PATHS = {"/auth/login", "/auth/callback", "/auth/logout", "/api/healthz"}
 
 # ---------------------------------------------------------------------------
-# OIDC CLIENT SETUP
-# ---------------------------------------------------------------------------
-
-import httpx as _httpx
-
-# ---------------------------------------------------------------------------
-# authlib's StarletteRemoteApp calls load_server_metadata() which internally
-# does: async with self._get_oauth_client() as client: client.request(...)
-# The client is built fresh each time with no timeout argument, so the httpx
-# default (5 s) is used — too short for DNS + TLS in k8s.
-#
-# Fix: monkey-patch the metadata fetch to use a long-lived shared client
-# that has explicit timeouts. We wrap load_server_metadata on the app object
-# after registration (see below, post-registration patch).
+# OIDC — shared httpx client + metadata cache
 # ---------------------------------------------------------------------------
 
 _OIDC_TIMEOUT = _httpx.Timeout(connect=30.0, read=30.0, write=10.0, pool=5.0)
-_shared_httpx: _httpx.AsyncClient | None = None
+_shared_httpx: Optional[_httpx.AsyncClient] = None
 
 
 def _get_shared_httpx() -> _httpx.AsyncClient:
@@ -91,7 +79,6 @@ oauth = OAuth()
 
 if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
     _metadata_url = f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration"
-
     oauth.register(
         name="oidc",
         client_id=OIDC_CLIENT_ID,
@@ -99,11 +86,6 @@ if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
         server_metadata_url=_metadata_url,
         client_kwargs={"scope": OIDC_SCOPES},
     )
-
-    # Replace authlib's load_server_metadata with our own implementation
-    # that uses a shared httpx client with generous timeouts.
-    # The replacement caches the result in a simple closure variable so
-    # subsequent calls are instant — no authlib internals involved.
     _cached_metadata: dict = {}
 
     async def _load_server_metadata_with_timeout():
@@ -119,59 +101,36 @@ if OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID:
 
 # ---------------------------------------------------------------------------
 # MIDDLEWARE STACK
-#
-# Starlette builds the chain in REVERSE registration order — the LAST
-# add_middleware() call becomes the OUTERMOST layer (executes first).
-#
-# Desired execution order (outermost first):
-#   SessionMiddleware -> CORSMiddleware -> _AuthMiddleware -> app
-#
-# So we register innermost first:
-#   1. _AuthMiddleware  (first registered = innermost = runs last)
-#   2. CORSMiddleware
-#   3. SessionMiddleware (last registered = outermost = runs FIRST,
-#      populating request.session before _AuthMiddleware sees it)
+# Registration order: innermost first, outermost last.
+# Execution order: SessionMiddleware → CORS → _AuthMiddleware → app
 # ---------------------------------------------------------------------------
 
 class _AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-
         if not OIDC_ENABLED:
             return await call_next(request)
-
         if path in _PUBLIC_PATHS or path.startswith("/static/") or path in ("/favicon.ico",):
             return await call_next(request)
-
         if request.session.get("user"):
             return await call_next(request)
-
         if path.startswith("/api/"):
             return Response(
                 content=json.dumps({"detail": "Not authenticated"}),
                 status_code=401,
                 media_type="application/json",
             )
-
         return RedirectResponse(url="/auth/login")
 
 
 app.add_middleware(_AuthMiddleware)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
     max_age=SESSION_MAX_AGE,
     https_only=False,
     same_site="lax",
-    # Explicit cookie name helps avoid conflicts when multiple apps share domain
     session_cookie="dmarc_session",
 )
 
@@ -216,9 +175,10 @@ async def auth_callback(request: Request):
         client = _get_shared_httpx()
         token_resp = await client.post(
             metadata["token_endpoint"],
-            data={"grant_type":"authorization_code","code":code,"redirect_uri":redirect_uri,
-                  "client_id":OIDC_CLIENT_ID,"client_secret":OIDC_CLIENT_SECRET},
-            headers={"Accept":"application/json"},
+            data={"grant_type": "authorization_code", "code": code,
+                  "redirect_uri": redirect_uri, "client_id": OIDC_CLIENT_ID,
+                  "client_secret": OIDC_CLIENT_SECRET},
+            headers={"Accept": "application/json"},
         )
         token_resp.raise_for_status()
         token_data = token_resp.json()
@@ -252,11 +212,11 @@ async def auth_callback(request: Request):
 @app.get("/auth/logout")
 async def auth_logout(request: Request):
     request.session.clear()
-    # Try to redirect to OIDC end_session endpoint if available
     if OIDC_ENABLED and OIDC_ISSUER:
         try:
-            meta_url = f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration"
-            meta = http_requests.get(meta_url, timeout=4).json()
+            meta = http_requests.get(
+                f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration", timeout=4
+            ).json()
             end_session = meta.get("end_session_endpoint")
             if end_session:
                 post_logout = OIDC_REDIRECT_URI.replace("/auth/callback", "/") if OIDC_REDIRECT_URI else "/"
@@ -268,14 +228,12 @@ async def auth_logout(request: Request):
 
 @app.get("/api/auth/me")
 async def auth_me(request: Request):
-    """Returns current session user info (or null if not authenticated / OIDC disabled)."""
     if not OIDC_ENABLED:
         return {"oidc_enabled": False, "user": None}
-    user = request.session.get("user")
-    return {"oidc_enabled": True, "user": user}
+    return {"oidc_enabled": True, "user": request.session.get("user")}
 
 # ---------------------------------------------------------------------------
-# DATABASE ABSTRACTION
+# DATABASE
 # ---------------------------------------------------------------------------
 
 if DB_BACKEND == "postgres":
@@ -298,55 +256,22 @@ if DB_BACKEND == "postgres":
         return row[0] if row else None
 
     def init_db():
-        conn = get_db()
-        cur  = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                id           SERIAL PRIMARY KEY,
-                report_id    TEXT UNIQUE,
-                org_name     TEXT,
-                email        TEXT,
-                domain       TEXT,
-                date_begin   BIGINT,
-                date_end     BIGINT,
-                policy_p     TEXT,
-                policy_sp    TEXT,
-                policy_pct   INTEGER,
-                fetched_at   TEXT,
-                imap_from    TEXT,
-                imap_to      TEXT,
-                imap_subject TEXT
-            )""")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS records (
-                id            SERIAL PRIMARY KEY,
-                report_id     TEXT REFERENCES reports(report_id),
-                source_ip     TEXT,
-                count         INTEGER,
-                disposition   TEXT,
-                dkim_result   TEXT,
-                spf_result    TEXT,
-                header_from   TEXT,
-                envelope_from TEXT,
-                geo_country   TEXT,
-                geo_lat       DOUBLE PRECISION,
-                geo_lon       DOUBLE PRECISION
-            )""")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS fetch_log (
-                id          SERIAL PRIMARY KEY,
-                fetched_at  TEXT,
-                new_reports INTEGER,
-                errors      TEXT
-            )""")
-        for col, typedef in [("imap_from","TEXT"),("imap_to","TEXT"),("imap_subject","TEXT")]:
-            try:
-                cur.execute(f"ALTER TABLE reports ADD COLUMN IF NOT EXISTS {col} {typedef}")
-            except Exception:
-                pass
-        conn.commit()
-        cur.close()
-        conn.close()
+        conn = get_db(); cur = conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS reports (
+            id SERIAL PRIMARY KEY, report_id TEXT UNIQUE, org_name TEXT, email TEXT,
+            domain TEXT, date_begin BIGINT, date_end BIGINT, policy_p TEXT, policy_sp TEXT,
+            policy_pct INTEGER, fetched_at TEXT, imap_from TEXT, imap_to TEXT, imap_subject TEXT)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS records (
+            id SERIAL PRIMARY KEY, report_id TEXT REFERENCES reports(report_id),
+            source_ip TEXT, count INTEGER, disposition TEXT, dkim_result TEXT, spf_result TEXT,
+            header_from TEXT, envelope_from TEXT, geo_country TEXT,
+            geo_lat DOUBLE PRECISION, geo_lon DOUBLE PRECISION)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS fetch_log (
+            id SERIAL PRIMARY KEY, fetched_at TEXT, new_reports INTEGER, errors TEXT)""")
+        for col, td in [("imap_from","TEXT"),("imap_to","TEXT"),("imap_subject","TEXT")]:
+            try: cur.execute(f"ALTER TABLE reports ADD COLUMN IF NOT EXISTS {col} {td}")
+            except Exception: pass
+        conn.commit(); cur.close(); conn.close()
 
     PH = "%s"
 
@@ -359,8 +284,7 @@ else:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def fetchall_dict(cursor):
-        return [dict(r) for r in cursor.fetchall()]
+    def fetchall_dict(cursor): return [dict(r) for r in cursor.fetchall()]
 
     def fetchone_val(cursor):
         row = cursor.fetchone()
@@ -370,55 +294,26 @@ else:
         conn = get_db()
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS reports (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_id    TEXT UNIQUE,
-                org_name     TEXT,
-                email        TEXT,
-                domain       TEXT,
-                date_begin   INTEGER,
-                date_end     INTEGER,
-                policy_p     TEXT,
-                policy_sp    TEXT,
-                policy_pct   INTEGER,
-                fetched_at   TEXT,
-                imap_from    TEXT,
-                imap_to      TEXT,
-                imap_subject TEXT
-            );
+                id INTEGER PRIMARY KEY AUTOINCREMENT, report_id TEXT UNIQUE,
+                org_name TEXT, email TEXT, domain TEXT, date_begin INTEGER, date_end INTEGER,
+                policy_p TEXT, policy_sp TEXT, policy_pct INTEGER, fetched_at TEXT,
+                imap_from TEXT, imap_to TEXT, imap_subject TEXT);
             CREATE TABLE IF NOT EXISTS records (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                report_id     TEXT REFERENCES reports(report_id),
-                source_ip     TEXT,
-                count         INTEGER,
-                disposition   TEXT,
-                dkim_result   TEXT,
-                spf_result    TEXT,
-                header_from   TEXT,
-                envelope_from TEXT,
-                geo_country   TEXT,
-                geo_lat       REAL,
-                geo_lon       REAL
-            );
+                id INTEGER PRIMARY KEY AUTOINCREMENT, report_id TEXT REFERENCES reports(report_id),
+                source_ip TEXT, count INTEGER, disposition TEXT, dkim_result TEXT, spf_result TEXT,
+                header_from TEXT, envelope_from TEXT, geo_country TEXT, geo_lat REAL, geo_lon REAL);
             CREATE TABLE IF NOT EXISTS fetch_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                fetched_at  TEXT,
-                new_reports INTEGER,
-                errors      TEXT
-            );
-        """)
+                id INTEGER PRIMARY KEY AUTOINCREMENT, fetched_at TEXT,
+                new_reports INTEGER, errors TEXT);""")
         for col in ["imap_from", "imap_to", "imap_subject"]:
-            try:
-                conn.execute(f"ALTER TABLE reports ADD COLUMN {col} TEXT")
-                conn.commit()
-            except Exception:
-                pass
+            try: conn.execute(f"ALTER TABLE reports ADD COLUMN {col} TEXT"); conn.commit()
+            except Exception: pass
         conn.close()
 
     PH = "?"
 
 
-def _ph(*args):
-    return ", ".join([PH] * len(args))
+def _ph(*args): return ", ".join([PH] * len(args))
 
 # ---------------------------------------------------------------------------
 # GEO LOOKUP
@@ -427,18 +322,15 @@ def _ph(*args):
 _geo_cache: dict = {}
 
 def geo_lookup(ip: str) -> dict:
-    if ip in _geo_cache:
-        return _geo_cache[ip]
+    if ip in _geo_cache: return _geo_cache[ip]
     try:
-        r = http_requests.get(
-            f"http://ip-api.com/json/{ip}?fields=country,countryCode,lat,lon", timeout=4)
+        r = http_requests.get(f"http://ip-api.com/json/{ip}?fields=country,lat,lon", timeout=4)
         if r.status_code == 200:
             d = r.json()
             result = {"country": d.get("country",""), "lat": d.get("lat"), "lon": d.get("lon")}
             _geo_cache[ip] = result
             return result
-    except Exception:
-        pass
+    except Exception: pass
     return {"country": "", "lat": None, "lon": None}
 
 # ---------------------------------------------------------------------------
@@ -446,30 +338,22 @@ def geo_lookup(ip: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _decode_header(value: str) -> str:
-    if not value:
-        return ""
+    if not value: return ""
     try:
         parts = email.header.decode_header(value)
-        decoded = []
-        for part, charset in parts:
-            if isinstance(part, bytes):
-                decoded.append(part.decode(charset or "utf-8", errors="replace"))
-            else:
-                decoded.append(part)
-        return " ".join(decoded).strip()
-    except Exception:
-        return value.strip()
+        return " ".join(
+            p.decode(c or "utf-8", errors="replace") if isinstance(p, bytes) else p
+            for p, c in parts
+        ).strip()
+    except Exception: return value.strip()
 
 
 def parse_dmarc_xml(xml_bytes: bytes) -> Optional[dict]:
-    try:
-        root = ET.fromstring(xml_bytes)
-    except ET.ParseError:
-        return None
+    try: root = ET.fromstring(xml_bytes)
+    except ET.ParseError: return None
     meta   = root.find("report_metadata")
     policy = root.find("policy_published")
-    if meta is None or policy is None:
-        return None
+    if meta is None or policy is None: return None
     report = {
         "report_id":  (meta.findtext("report_id") or "").strip(),
         "org_name":   (meta.findtext("org_name") or "").strip(),
@@ -483,27 +367,22 @@ def parse_dmarc_xml(xml_bytes: bytes) -> Optional[dict]:
         "records": [],
     }
     for rec in root.findall("record"):
-        row        = rec.find("row")
-        policy_ev  = rec.find("row/policy_evaluated")
-        auth       = rec.find("auth_results")
-        identifiers= rec.find("identifiers")
-        if row is None:
-            continue
-        dkim_result = "unknown"
-        spf_result  = "unknown"
+        row       = rec.find("row")
+        policy_ev = rec.find("row/policy_evaluated")
+        auth      = rec.find("auth_results")
+        ids       = rec.find("identifiers")
+        if row is None: continue
+        dkim = "unknown"; spf = "unknown"
         if auth is not None:
-            dkim_el = auth.find("dkim/result")
-            spf_el  = auth.find("spf/result")
-            if dkim_el is not None: dkim_result = (dkim_el.text or "unknown").strip()
-            if spf_el  is not None: spf_result  = (spf_el.text  or "unknown").strip()
+            el = auth.find("dkim/result");  dkim = (el.text or "unknown").strip() if el is not None else dkim
+            el = auth.find("spf/result");   spf  = (el.text or "unknown").strip() if el is not None else spf
         report["records"].append({
             "source_ip":     (row.findtext("source_ip") or "").strip(),
             "count":         int(row.findtext("count") or 0),
             "disposition":   (policy_ev.findtext("disposition") if policy_ev is not None else "") or "none",
-            "dkim_result":   dkim_result,
-            "spf_result":    spf_result,
-            "header_from":   (identifiers.findtext("header_from")   if identifiers is not None else "") or "",
-            "envelope_from": (identifiers.findtext("envelope_from") if identifiers is not None else "") or "",
+            "dkim_result":   dkim, "spf_result": spf,
+            "header_from":   (ids.findtext("header_from")   if ids is not None else "") or "",
+            "envelope_from": (ids.findtext("envelope_from") if ids is not None else "") or "",
         })
     return report
 
@@ -511,19 +390,32 @@ def parse_dmarc_xml(xml_bytes: bytes) -> Optional[dict]:
 def extract_xml_from_attachment(payload: bytes, filename: str) -> Optional[bytes]:
     fname = (filename or "").lower()
     try:
-        if fname.endswith(".gz"):   return gzip.decompress(payload)
+        if fname.endswith(".gz"):  return gzip.decompress(payload)
         if fname.endswith(".zip"):
             with zipfile.ZipFile(BytesIO(payload)) as zf:
                 for name in zf.namelist():
                     if name.endswith(".xml"): return zf.read(name)
-        if fname.endswith(".xml"):  return payload
-    except Exception:
-        pass
+        if fname.endswith(".xml"): return payload
+    except Exception: pass
     return None
 
 # ---------------------------------------------------------------------------
-# IMAP FETCHER
+# IMAP FETCHER — supports SSL, plain, and STARTTLS
 # ---------------------------------------------------------------------------
+
+def _imap_connect() -> imaplib.IMAP4:
+    """Create and return an authenticated-ready IMAP connection."""
+    if IMAP_USE_SSL:
+        return imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    else:
+        mail = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        if IMAP_STARTTLS:
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE
+            mail.starttls(ssl_context=ctx)
+        return mail
+
 
 def _imap_ensure_folder(mail, folder: str) -> bool:
     typ, _ = mail.select(folder)
@@ -537,20 +429,17 @@ def _imap_ensure_folder(mail, folder: str) -> bool:
 def fetch_reports_from_imap() -> tuple[int, list[str]]:
     if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
         return 0, ["IMAP not configured"]
-    errors = []
-    new_count = 0
+    errors = []; new_count = 0
     try:
-        mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT) if IMAP_USE_SSL else imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+        mail = _imap_connect()
         mail.login(IMAP_USER, IMAP_PASS)
         if not _imap_ensure_folder(mail, IMAP_PROCESSED_FOLDER):
             errors.append(f"Cannot create/access folder: {IMAP_PROCESSED_FOLDER}")
-            mail.logout()
-            return 0, errors
+            mail.logout(); return 0, errors
         mail.select(IMAP_FOLDER)
         _, data = mail.search(None, "ALL")
         ids = data[0].split()
-        conn = get_db()
-        cur  = conn.cursor()
+        conn = get_db(); cur = conn.cursor()
         for msg_id in ids[-500:]:
             imported = False
             try:
@@ -561,8 +450,7 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
                 imap_to      = _decode_header(msg.get("To", ""))
                 imap_subject = _decode_header(msg.get("Subject", ""))
                 for part in msg.walk():
-                    ct      = part.get_content_type()
-                    fname   = part.get_filename() or ""
+                    ct = part.get_content_type(); fname = part.get_filename() or ""
                     payload = part.get_payload(decode=True)
                     if payload is None: continue
                     xml_bytes = None
@@ -573,56 +461,39 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
                     report = parse_dmarc_xml(xml_bytes)
                     if not report or not report["report_id"]: continue
                     cur.execute(f"SELECT id FROM reports WHERE report_id={PH}", (report["report_id"],))
-                    if cur.fetchone():
-                        imported = True
-                        continue
+                    if cur.fetchone(): imported = True; continue
                     fetched_at = datetime.utcnow().isoformat()
-                    cur.execute(f"""
-                        INSERT INTO reports
-                          (report_id,org_name,email,domain,date_begin,date_end,
-                           policy_p,policy_sp,policy_pct,fetched_at,
-                           imap_from,imap_to,imap_subject)
-                        VALUES ({_ph(*[0]*13)})
-                    """, (report["report_id"],report["org_name"],report["email"],
-                          report["domain"],report["date_begin"],report["date_end"],
-                          report["policy_p"],report["policy_sp"],report["policy_pct"],
-                          fetched_at,imap_from,imap_to,imap_subject))
+                    cur.execute(f"""INSERT INTO reports
+                        (report_id,org_name,email,domain,date_begin,date_end,
+                         policy_p,policy_sp,policy_pct,fetched_at,imap_from,imap_to,imap_subject)
+                        VALUES ({_ph(*[0]*13)})""",
+                        (report["report_id"],report["org_name"],report["email"],
+                         report["domain"],report["date_begin"],report["date_end"],
+                         report["policy_p"],report["policy_sp"],report["policy_pct"],
+                         fetched_at,imap_from,imap_to,imap_subject))
                     for rec in report["records"]:
                         geo = geo_lookup(rec["source_ip"])
-                        cur.execute(f"""
-                            INSERT INTO records
-                              (report_id,source_ip,count,disposition,dkim_result,spf_result,
-                               header_from,envelope_from,geo_country,geo_lat,geo_lon)
-                            VALUES ({_ph(*[0]*11)})
-                        """, (report["report_id"],rec["source_ip"],rec["count"],
-                              rec["disposition"],rec["dkim_result"],rec["spf_result"],
-                              rec["header_from"],rec["envelope_from"],
-                              geo["country"],geo["lat"],geo["lon"]))
-                    conn.commit()
-                    new_count += 1
-                    imported = True
-            except Exception as e:
-                errors.append(str(e))
-                continue
+                        cur.execute(f"""INSERT INTO records
+                            (report_id,source_ip,count,disposition,dkim_result,spf_result,
+                             header_from,envelope_from,geo_country,geo_lat,geo_lon)
+                            VALUES ({_ph(*[0]*11)})""",
+                            (report["report_id"],rec["source_ip"],rec["count"],
+                             rec["disposition"],rec["dkim_result"],rec["spf_result"],
+                             rec["header_from"],rec["envelope_from"],
+                             geo["country"],geo["lat"],geo["lon"]))
+                    conn.commit(); new_count += 1; imported = True
+            except Exception as e: errors.append(str(e)); continue
             if imported:
                 try:
                     result = mail.copy(msg_id, IMAP_PROCESSED_FOLDER)
-                    if result[0] == "OK":
-                        mail.store(msg_id, "+FLAGS", "\\\\Deleted")
-                    else:
-                        errors.append(f"COPY failed for msg {msg_id}: {result}")
-                except Exception as e:
-                    errors.append(f"Move failed for msg {msg_id}: {e}")
+                    if result[0] == "OK": mail.store(msg_id, "+FLAGS", "\\\\Deleted")
+                    else: errors.append(f"COPY failed for msg {msg_id}: {result}")
+                except Exception as e: errors.append(f"Move failed for msg {msg_id}: {e}")
         mail.expunge()
-        cur.execute(
-            f"INSERT INTO fetch_log (fetched_at,new_reports,errors) VALUES ({_ph(*[0]*3)})",
+        cur.execute(f"INSERT INTO fetch_log (fetched_at,new_reports,errors) VALUES ({_ph(*[0]*3)})",
             (datetime.utcnow().isoformat(), new_count, "; ".join(errors[:5])))
-        conn.commit()
-        cur.close()
-        conn.close()
-        mail.logout()
-    except Exception as e:
-        errors.append(f"IMAP connection error: {e}")
+        conn.commit(); cur.close(); conn.close(); mail.logout()
+    except Exception as e: errors.append(f"IMAP connection error: {e}")
     return new_count, errors
 
 # ---------------------------------------------------------------------------
@@ -632,10 +503,8 @@ def fetch_reports_from_imap() -> tuple[int, list[str]]:
 def poller_loop():
     time.sleep(10)
     while True:
-        try:
-            fetch_reports_from_imap()
-        except Exception:
-            pass
+        try: fetch_reports_from_imap()
+        except Exception: pass
         time.sleep(POLL_INTERVAL)
 
 # ---------------------------------------------------------------------------
@@ -648,32 +517,30 @@ def startup():
     threading.Thread(target=poller_loop, daemon=True).start()
 
 
-def _q(days: int):
-    return int((datetime.utcnow() - timedelta(days=days)).timestamp())
-
+def _q(days: int): return int((datetime.utcnow() - timedelta(days=days)).timestamp())
 
 def _domain_clause(domain: str) -> tuple[str, list]:
-    if domain:
-        return f" AND p.domain = {PH} ", [domain]
+    if domain: return f" AND p.domain = {PH} ", [domain]
     return "", []
+
+
+@app.get("/api/healthz")
+def healthz(): return {"status": "ok"}
 
 
 @app.get("/api/stats/domains")
 def list_domains(days: int = 30):
-    since = _q(days)
-    conn  = get_db(); cur = conn.cursor()
+    since = _q(days); conn = get_db(); cur = conn.cursor()
     cur.execute(f"SELECT DISTINCT domain FROM reports WHERE date_end >= {PH} ORDER BY domain", (since,))
-    rows = fetchall_dict(cur)
-    cur.close(); conn.close()
+    rows = fetchall_dict(cur); cur.close(); conn.close()
     return [r["domain"] for r in rows]
 
 
 @app.get("/api/stats/overview")
 def overview(days: int = 30, domain: str = ""):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
     cur.execute(f"SELECT COALESCE(SUM(r.count),0) FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc}", [since]+dp)
-    total_messages = fetchone_val(cur)
+    total = fetchone_val(cur)
     cur.execute(f"SELECT disposition, COALESCE(SUM(count),0) as n FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} GROUP BY disposition", [since]+dp)
     by_disp = fetchall_dict(cur)
     cur.execute(f"SELECT COALESCE(SUM(count),0) FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} AND r.dkim_result='pass'", [since]+dp)
@@ -683,13 +550,14 @@ def overview(days: int = 30, domain: str = ""):
     cur.execute(f"SELECT COUNT(*) FROM reports WHERE date_end >= {PH}{dc}", [since]+dp)
     report_count = fetchone_val(cur)
     cur.close(); conn.close()
-    return {"total_messages": total_messages, "report_count": report_count, "dkim_pass": dkim_pass, "spf_pass": spf_pass, "disposition": {r["disposition"]: r["n"] for r in by_disp}, "domain_filter": domain or None}
+    return {"total_messages": total, "report_count": report_count, "dkim_pass": dkim_pass,
+            "spf_pass": spf_pass, "disposition": {r["disposition"]: r["n"] for r in by_disp},
+            "domain_filter": domain or None}
 
 
 @app.get("/api/stats/timeline")
 def timeline(days: int = 30, domain: str = ""):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
     if DB_BACKEND == "postgres":
         cur.execute(f"SELECT TO_CHAR(TO_TIMESTAMP(p.date_begin),'YYYY-MM-DD') as day, r.disposition, COALESCE(SUM(r.count),0) as n FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} GROUP BY day, r.disposition ORDER BY day", [since]+dp)
     else:
@@ -705,8 +573,7 @@ def timeline(days: int = 30, domain: str = ""):
 
 @app.get("/api/stats/by_domain")
 def by_domain(days: int = 30, domain: str = ""):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
     cur.execute(f"SELECT p.domain, r.disposition, COALESCE(SUM(r.count),0) as n FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} GROUP BY p.domain, r.disposition", [since]+dp)
     rows = fetchall_dict(cur); cur.close(); conn.close()
     domains = {}
@@ -719,8 +586,7 @@ def by_domain(days: int = 30, domain: str = ""):
 
 @app.get("/api/stats/sources")
 def sources(days: int = 30, limit: int = 100, domain: str = ""):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
     if DB_BACKEND == "postgres":
         cur.execute(f"SELECT r.source_ip, COALESCE(SUM(r.count),0) as total, r.dkim_result, r.spf_result, r.disposition, r.geo_country, r.geo_lat, r.geo_lon, STRING_AGG(DISTINCT p.domain,',') as domains FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} GROUP BY r.source_ip,r.dkim_result,r.spf_result,r.disposition,r.geo_country,r.geo_lat,r.geo_lon ORDER BY total DESC LIMIT {PH}", [since]+dp+[limit])
     else:
@@ -731,8 +597,7 @@ def sources(days: int = 30, limit: int = 100, domain: str = ""):
 
 @app.get("/api/stats/geo")
 def geo(days: int = 30, domain: str = ""):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
     cur.execute(f"SELECT r.geo_lat, r.geo_lon, r.geo_country, r.disposition, COALESCE(SUM(r.count),0) as total FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} AND r.geo_lat IS NOT NULL GROUP BY r.geo_lat, r.geo_lon, r.geo_country, r.disposition", [since]+dp)
     rows = fetchall_dict(cur); cur.close(); conn.close()
     return rows
@@ -740,8 +605,7 @@ def geo(days: int = 30, domain: str = ""):
 
 @app.get("/api/alerts")
 def alerts(days: int = 30, domain: str = ""):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
     cur.execute(f"SELECT p.domain, p.policy_p, r.disposition, SUM(r.count) as n FROM records r JOIN reports p ON r.report_id=p.report_id WHERE p.date_end >= {PH}{dc} AND r.disposition IN ('reject','quarantine') GROUP BY p.domain,p.policy_p,r.disposition ORDER BY n DESC", [since]+dp)
     failing = fetchall_dict(cur)
     cur.execute(f"SELECT DISTINCT domain, policy_p FROM reports WHERE date_end >= {PH}{dc} AND policy_p='none'", [since]+dp)
@@ -752,27 +616,19 @@ def alerts(days: int = 30, domain: str = ""):
 
 @app.get("/api/rejects")
 def rejects(days: int = 30, domain: str = "", limit: int = 500):
-    since = _q(days); dc, dp = _domain_clause(domain)
-    conn = get_db(); cur = conn.cursor()
-    cur.execute(f"""
-        SELECT p.domain, p.org_name, p.policy_p, p.imap_from, p.imap_to, p.imap_subject,
-               p.date_begin, p.date_end, r.source_ip, r.count, r.disposition,
-               r.dkim_result, r.spf_result, r.header_from, r.envelope_from, r.geo_country
+    since = _q(days); dc, dp = _domain_clause(domain); conn = get_db(); cur = conn.cursor()
+    cur.execute(f"""SELECT p.domain, p.org_name, p.policy_p, p.imap_from, p.imap_to, p.imap_subject,
+        p.date_begin, p.date_end, r.source_ip, r.count, r.disposition,
+        r.dkim_result, r.spf_result, r.header_from, r.envelope_from, r.geo_country
         FROM records r JOIN reports p ON r.report_id=p.report_id
         WHERE p.date_end >= {PH}{dc} AND r.disposition IN ('reject','quarantine')
-        ORDER BY p.date_end DESC, r.count DESC LIMIT {PH}
-    """, [since]+dp+[limit])
+        ORDER BY p.date_end DESC, r.count DESC LIMIT {PH}""", [since]+dp+[limit])
     rows = fetchall_dict(cur); cur.close(); conn.close()
     for row in rows:
         for col in ("date_begin","date_end"):
             if row.get(col):
                 row[col+"_str"] = datetime.utcfromtimestamp(row[col]).strftime("%Y-%m-%d")
     return rows
-
-
-@app.get("/api/healthz")
-def healthz():
-    return {"status": "ok"}
 
 
 @app.get("/api/fetch_log")

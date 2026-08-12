@@ -23,7 +23,6 @@ spec:
           ports:
             - containerPort: 8000
           env:
-            # ── IMAP ──────────────────────────────────────────────────────
             - name: IMAP_HOST
               value: {{ .Values.imap.host | quote }}
             - name: IMAP_PORT
@@ -41,10 +40,10 @@ spec:
               value: {{ .Values.imap.processedFolder | quote }}
             - name: IMAP_USE_SSL
               value: {{ .Values.imap.useSSL | quote }}
+            - name: IMAP_STARTTLS
+              value: {{ .Values.imap.starttls | quote }}
             - name: POLL_INTERVAL_SECONDS
               value: {{ .Values.imap.pollIntervalSeconds | quote }}
-
-            # ── Database ──────────────────────────────────────────────────
             - name: DB_BACKEND
               value: {{ .Values.db.backend | quote }}
             {{- if eq .Values.db.backend "sqlite" }}
@@ -68,8 +67,6 @@ spec:
             - name: PG_SSLMODE
               value: {{ .Values.db.postgres.sslmode | quote }}
             {{- end }}
-
-            # ── OIDC ──────────────────────────────────────────────────────
             - name: OIDC_ENABLED
               value: {{ .Values.oidc.enabled | quote }}
             {{- if .Values.oidc.enabled }}
@@ -94,7 +91,6 @@ spec:
             - name: SESSION_MAX_AGE
               value: {{ .Values.oidc.sessionMaxAge | quote }}
             {{- end }}
-
           volumeMounts:
             - name: data
               mountPath: /data
