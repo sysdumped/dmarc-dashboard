@@ -1,0 +1,12 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  image:
+    uses: sysdumped/ci-workflows/.github/workflows/docker-build.yml@main
+    with:
+      image_name: dmarc-dashboard
+    permissions:
+      contents: read
+      packages: write
