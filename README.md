@@ -14,7 +14,7 @@ I report vengono letti dalla mailbox configurata, importati nel database e visua
 | Storage    | SQLite (default) oppure PostgreSQL              |
 | Geo lookup | ip-api.com (gratuito, nessuna chiave richiesta) |
 | Container  | Docker multi-stage (Node 18 + Python 3.12-slim) |
-| Deploy     | Helm chart v0.4.0 (Rancher-ready)               |
+| Deploy     | Helm chart in Charts-Collection (Rancher, Fleet)|
 
 ---
 
@@ -75,16 +75,7 @@ dmarc-dashboard/
 │           ├── SourcesTable.js    # Tabella IP sorgenti
 │           └── RejectDetail.js    # Dettaglio reject/quarantena con expand
 ├── Dockerfile             # Multi-stage: Node 18 build → Python 3.12 serve
-├── docker-compose.yml     # Per test locale con .env
-└── helm/                  # Helm chart v0.4.0
-    ├── Chart.yaml
-    ├── values.yaml
-    ├── questions.yaml     # Form Rancher (5 gruppi)
-    └── templates/
-        ├── _helpers.tpl
-        ├── secret.yaml            # Secret IMAP + Secret PG (condizionale)
-        ├── deployment.yaml        # Env var condizionali per DB backend
-        └── service-ingress-pvc.yaml
+└── docker-compose.yml     # Per test locale con .env
 ```
 
 ---
@@ -118,35 +109,28 @@ docker compose up -d --build
 
 ## Deploy su Kubernetes via Rancher / Helm
 
-### 1. Build e push dell'immagine
+### 1. Immagine
+
+Un tag `vX.Y.Z` su questo repo costruisce e pubblica `ghcr.io/sysdumped/dmarc-dashboard:X.Y.Z` (workflow `release`).
 
 ```bash
-docker build -t registry.example.com/dmarc-dashboard:latest .
-docker push registry.example.com/dmarc-dashboard:latest
+git tag v1.0.1 && git push origin v1.0.1
 ```
 
-### 2. Deploy da Rancher Apps
+### 2. Chart
 
-1. Aggiungi il repository Gitea come **Helm Chart Repository** in Rancher  
-   *(Apps → Repositories → Add → URL del tuo Gitea)*
-2. Vai su **Apps → Charts**, cerca `dmarc-dashboard`
-3. Compila il form (5 gruppi: Immagine, Connessione IMAP, Database, Ingress, Storage, Risorse)
-4. Le password finiscono automaticamente in Secret Kubernetes separati (`-imap`, `-pg`)
+Il chart sta in [`sysdumped/Charts-Collection/dmarc-dashboard`](https://github.com/sysdumped/Charts-Collection/tree/main/dmarc-dashboard) ed è pubblicato sul ChartMuseum `https://charts.sysdump.cloud`.
 
-### 3. Deploy da CLI
+- **Rancher**: aggiungi il ChartMuseum in Apps → Repositories, poi Apps → Charts → `dmarc-dashboard`.
+- **Fleet (GitOps)**: l'app si configura nel repo `sysdumped/deploy`. Le password si passano con Secret già presenti nel cluster (`imap.existingSecret`, `db.postgres.existingSecret`, `oidc.existingSecret`), mai in chiaro nei values.
+- **CLI**:
 
 ```bash
-# Crea i namespace se necessario
-kubectl create namespace dmarc
-
-helm upgrade --install dmarc-dashboard ./helm \
-  -n dmarc \
-  --create-namespace \
-  -f helm/values.yaml \
-  --set image.repository=registry.example.com/dmarc-dashboard \
+helm repo add cm https://charts.sysdump.cloud --username <AK> --password <SK>
+helm upgrade --install dmarc-dashboard cm/dmarc-dashboard -n dmarc --create-namespace \
   --set imap.host=mail.example.com \
   --set imap.user=dmarc@example.com \
-  --set imap.password=PASSWORD \
+  --set imap.existingSecret=dmarc-imap \
   --set ingress.host=dmarc.example.com
 ```
 
